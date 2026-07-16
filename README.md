@@ -1,4 +1,10 @@
-# VeilX 服务器安装器
+# Matrix服务器安装器
+一个一键脚本 从此让你远离党国微信！
+
+💬 聊天 / 群聊 / 传图传视频 —— 想发啥发啥,再也没有"该消息因违反相关规定无法查看"
+📞 语音 / 视频通话 —— 清晰到能听见对方呼吸,而不是听见后台的转录
+🔒 端到端加密 —— 服务器是你的、密钥是你的,连"删你消息"这门生意都由你独家垄断
+🚫 没有 广告、没有开屏、没有"系统检测到异常"、没有"请你喝杯茶"
 
 一键自托管的私密团队通讯:加密聊天、群聊、图片/视频/文件互传、一对一及群组语音视频通话,数据全在你自己的服务器。一行命令部署 Matrix 服务端(Synapse + Element Call + LiveKit),配套网页/桌面/移动多端客户端。Self-hosted encrypted team chat with group voice & video calls — one-command Matrix server installer + cross-platform client.
 
