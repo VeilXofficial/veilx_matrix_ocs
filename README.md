@@ -2,8 +2,7 @@
 
 # Matrix 私有通讯服务器 · 一键部署
 
-**你的服务器,你的数据 —— 为商业机密保护而生的自托管团队通讯系统。推荐使用ElementX客户端 VeilX客户端正在开发中，VeilX相比ElementX外观更加美观，整体更加易用，支持功能更多，修改Bug更快，代码开源可审计，运维团队设立在英国、新加坡、日本等地区。 客户资料、报价合同、内部讨论、语音视频会议 —— 全部只存在于你自己的服务器上。 一行命令部署,默认全封闭配置,不懂网络技术也能用:每个选择都有大白话说明。基于 [Matrix](https://matrix.org) 开放协议,端到端加密,开源可审计。**
-
+**你的服务器,你的数据 —— 为商业机密保护而生的自托管团队通讯系统。推荐使用ElementX客户端 VeilX客户端正在开发中，VeilX相比ElementX外观更加美观，整体更加易用，支持功能更多，修改Bug更快，代码开源可审计，运维团队设立在英国、新加坡、日本等地区。 客户资料、报价合同、内部讨论、语音视频会议 —— 全部只存在于你自己的服务器上。 一行命令部署,默认全封闭配置,不懂网络技术也能用:每个选择都有大白话说明。基于 [Matrix](https://matrix.org) 开放协议,端到端加密,源码公开可审计(非商业免费)**
 
 </div>
 
@@ -169,17 +168,40 @@ cd /opt/matrix && sudo bash matrix-installer.sh adduser
 
 > 🖱️ 喜欢图形界面?浏览器打开 [admin.etke.cc](https://admin.etke.cc),Homeserver URL 填 `https://matrix.你的域名`,用 admin 登录,即可点鼠标管理用户(建号/改密/封禁)。
 
-## 🔧 日常维护(SSH 到服务器后执行)
+## 🔧 日常维护:管理菜单(SSH 到服务器后执行)
+
+装好之后,**再次运行脚本 = 打开中文管理菜单**,什么命令都不用记:
 
 ```bash
-cd /opt/matrix && docker compose ps                              # 服务状态(开通话 5 个 / 关通话 3 个,都应 running)
+cd /opt/matrix && sudo bash matrix-installer.sh
+```
+
+```
+┌──────────────────────────────────────────────┐
+│  Matrix 管理菜单   你的域名                   │
+└──────────────────────────────────────────────┘
+  1) 查看运行状态          5) 升级到最新版本
+  2) 添加团队成员          6) 重启所有服务
+  3) 修改配置              7) 彻底卸载
+  4) 立即备份              0) 退出
+```
+
+> 🔄 **改配置不用重装**(菜单选 3):显示当前配置,重新问一遍 3 个选项(**直接回车 = 保持当前值**),改完自动重启生效。账号、密码、聊天记录、密钥全部保持不变。
+
+<details>
+<summary>不用菜单,想直接敲命令?(点开)</summary>
+
+```bash
+cd /opt/matrix && docker compose ps                              # 服务状态(开通话 5 个 / 关通话 3 个)
 cd /opt/matrix && docker compose logs -f synapse                 # 看日志(Ctrl+C 退出)
 cd /opt/matrix && docker compose up -d                           # 重启
 cd /opt/matrix && docker compose pull && docker compose up -d    # 升级到最新版
-cd /opt/matrix && sudo bash matrix-installer.sh config           # ★修改配置(注册方式/通话/联邦)
+sudo bash matrix-installer.sh adduser                            # 加成员
+sudo bash matrix-installer.sh config                             # 改配置
+sudo bash matrix-installer.sh uninstall                          # 卸载
 ```
 
-> 🔄 **改配置不用重装**:`config` 命令会显示当前配置,重新问一遍 3 个选项(**直接回车 = 保持当前值**),改完自动重启生效。账号、密码、聊天记录、密钥全部保持不变。
+</details>
 
 ## 💾 备份(建议每周一次)
 
@@ -209,7 +231,7 @@ scp root@你的服务器IP:/opt/matrix/matrix-backup-*.tar.gz ~/Desktop/
 | 忘记 admin 密码 | `cat /opt/matrix/CREDENTIALS.txt`;或重跑 adduser 建个新管理员 |
 | 装完想改主意(开/关通话、改注册方式、开联邦) | 不用重装:`cd /opt/matrix && sudo bash matrix-installer.sh config`,回车=保持,数据账号全不动 |
 | 加密房间老消息"无法解密" | 正常:新设备没有历史密钥。在旧设备上对新设备做"验证会话"即可 |
-| 想彻底重装 | **先备份!**然后 `cd /opt/matrix && docker compose down`,`rm -rf /opt/matrix`,重跑安装命令 |
+| 想彻底卸载 / 重装 | 运行 `cd /opt/matrix && sudo bash matrix-installer.sh uninstall`(会先提示备份,双重确认后才删除);重装 = 卸载后重跑安装命令 |
 
 ## 📦 仓库内容
 
@@ -220,9 +242,16 @@ scp root@你的服务器IP:/opt/matrix/matrix-backup-*.tar.gz ~/Desktop/
 
 **装好后的服务端组件**:Caddy(自动 HTTPS)+ Synapse + PostgreSQL + LiveKit + lk-jwt-service,全部 Docker 编排,开源可审计。
 
-## 📄 许可
+## 📄 许可(注意:禁止商用)
 
-[MIT](LICENSE) —— 随便用,欢迎 Star ⭐
+本项目采用 [PolyForm Noncommercial 1.0.0](LICENSE) 许可:
+
+- ✅ **个人 / 团队内部 / 学习研究 / 公益组织使用:免费**,可自由修改分发(保留版权声明)
+- ❌ **商业用途一律禁止**(把它卖钱、集成进商业产品、用它提供收费服务等)
+- 🚫 **特别声明:禁止在淘宝、闲鱼(咸鱼)、拼多多、京东、抖音/快手小店、微店、转转等一切电商及二手平台售卖本项目;禁止收费代装、代部署、捆绑倒卖等类似牟利行为** —— 本项目免费,在任何平台看到有人卖就是倒卖,欢迎举报
+- 💼 想正规商用?联系作者获取商业授权:在本仓库提 [Issue](../../issues) 即可
+
+欢迎 Star ⭐
 
 ---
 
