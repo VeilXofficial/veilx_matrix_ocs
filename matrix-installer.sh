@@ -16,6 +16,7 @@
 #    sudo bash matrix-installer.sh           # 标准用法:向导会询问域名
 #    sudo bash matrix-installer.sh mychat.org  # 高级用法:直接带域名参数
 #    sudo bash matrix-installer.sh adduser   # 部署完后:添加团队成员
+#    sudo bash matrix-installer.sh config    # 部署完后:修改配置(注册/通话/联邦)
 #
 #  前提: 4 条 DNS A 记录已指向本服务器公网 IP:
 #    你的域名.com  matrix.你的域名.com  livekit.你的域名.com  matrix-rtc.你的域名.com
@@ -43,6 +44,7 @@ die()  { printf '\033[1;31m[✗] %s\033[0m\n' "$1"; exit 1; }
 # 交互辅助: 能真正打开 /dev/tty 才算有终端(curl|bash 时 stdin 是管道,
 # 但 SSH 会话的 /dev/tty 仍连着键盘;纯自动化/cron 则两者都没有)
 has_tty() { [ -t 0 ] || { [ -e /dev/tty ] && (exec </dev/tty) 2>/dev/null; }; }
+env_saved() { grep -E "^$1=" "$INSTALL_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2- || true; }
 press_enter() {
   if [ -t 0 ]; then read -rp "$1" REPLY || true
   elif [ -e /dev/tty ]; then read -rp "$1" REPLY < /dev/tty 2>/dev/null || true
@@ -58,11 +60,18 @@ fi
 command -v apt-get >/dev/null 2>&1 \
   || die "本脚本仅支持 Ubuntu / Debian 系统。买服务器时请选 Ubuntu 22.04 或 24.04 镜像"
 
+# 提前解析脚本自身绝对路径(必须在任何 cd 之前,供后续自拷贝)
+SELF_SRC=""
+if [ -f "${0:-}" ]; then
+  SELF_SRC="$(cd "$(dirname -- "$0")" && pwd)/$(basename -- "$0")"
+fi
+
 # ---------------------------------------------------------------------
 # 子命令: adduser —— 交互式添加成员
 # ---------------------------------------------------------------------
 if [ "${1:-}" = "adduser" ]; then
   [ -t 0 ] || die "adduser 需要交互终端,请直接在 SSH 里执行: bash matrix-installer.sh adduser"
+  [ "$(id -u)" -eq 0 ] || die "adduser 需要 root: sudo bash matrix-installer.sh adduser"
   cd "$INSTALL_DIR" 2>/dev/null || die "找不到 $INSTALL_DIR,先完成部署"
   docker compose ps --status running -q synapse 2>/dev/null | grep -q . \
     || die "Synapse 未运行。先执行: cd $INSTALL_DIR && docker compose up -d"
@@ -72,17 +81,28 @@ if [ "${1:-}" = "adduser" ]; then
 fi
 
 # ---------------------------------------------------------------------
+# 子命令: config —— 修改已部署实例的配置(注册方式/通话/联邦)
+# 走与安装相同的生成流程,但重新询问三个选项(回车=保持当前值)
+# ---------------------------------------------------------------------
+RECONFIG=0
+if [ "${1:-}" = "config" ]; then
+  RECONFIG=1
+  set --   # 清空参数,域名从已有配置读取
+fi
+
+# ---------------------------------------------------------------------
 # 0. 参数与基础环境
 # ---------------------------------------------------------------------
 [ "$(id -u)" -eq 0 ] || die "需要 root 权限。请用: sudo bash matrix-installer.sh 域名  (网站管道方式: curl -fsSL 网址 | sudo bash -s -- 域名)"
 
-# 已完成的部署直接快速重启,不再走向导(重跑体验更顺)
-if [ -f "$INSTALL_DIR/CREDENTIALS.txt" ] \
+# 已完成的部署直接快速重启,不再走向导(重跑体验更顺;config 模式除外)
+if [ "$RECONFIG" -eq 0 ] && [ -f "$INSTALL_DIR/CREDENTIALS.txt" ] \
    && grep -q "$MARKER" "$INSTALL_DIR/data/synapse/homeserver.yaml" 2>/dev/null; then
   cd "$INSTALL_DIR"
   warn "检测到已完成的部署($INSTALL_DIR),只做重启,不改任何配置/密钥。"
   docker compose up -d
-  RUNNING="$(docker compose ps --status running -q 2>/dev/null | wc -l | tr -d ' ')"
+  RUNNING="$(docker compose ps --status running -q 2>/dev/null | wc -l | tr -d ' ' || true)"
+  RUNNING="${RUNNING:-0}"
   EXPECTED=5
   grep -q '^ENABLE_CALLS=0' "$INSTALL_DIR/.env" 2>/dev/null && EXPECTED=3
   if [ "$RUNNING" -ge "$EXPECTED" ]; then
@@ -109,6 +129,11 @@ domain_ok() {
 }
 
 DOMAIN="$(normalize_domain "${1:-}")"
+if [ "$RECONFIG" -eq 1 ]; then
+  DOMAIN="$(normalize_domain "$(env_saved MATRIX_DOMAIN)")"
+  [ -n "$DOMAIN" ] || die "未找到已部署的配置($INSTALL_DIR/.env)。config 只能在完成安装的服务器上使用"
+  echo "修改配置: $DOMAIN(密钥/账号/聊天数据全部保持不变)"
+fi
 until domain_ok "$DOMAIN"; do
   [ -n "$DOMAIN" ] && warn "『$DOMAIN』不是可用的域名。需要一个你已经购买的真实域名(在 阿里云/腾讯云/Namecheap 等处几十元/年)。"
   if [ -t 0 ]; then
@@ -149,9 +174,26 @@ ask_opt() {  # $1=提示 $2=默认值 → 结果放入 REPLY
   [ -n "$REPLY" ] || REPLY="$2"
 }
 
+# 记录哪些选项是用户用环境变量显式指定的(config 模式免交互的依据)
+EXPLICIT_OPTS=0
+[ -n "${REG_MODE:-}${ENABLE_CALLS:-}${ENABLE_FEDERATION:-}" ] && EXPLICIT_OPTS=1
+
 REG_MODE="${REG_MODE:-$(env_saved REG_MODE)}"
 ENABLE_CALLS="${ENABLE_CALLS:-$(env_saved ENABLE_CALLS)}"
 ENABLE_FEDERATION="${ENABLE_FEDERATION:-$(env_saved ENABLE_FEDERATION)}"
+
+# 各选项的"回车默认值"(全新安装=推荐值;config 模式=当前值)
+DEF_REG="1"; DEF_CALLS="Y"; DEF_FED="N"
+if [ "$RECONFIG" -eq 1 ] && [ "$EXPLICIT_OPTS" -eq 0 ]; then
+  has_tty || die "config 需要交互终端;或用环境变量静默修改,如: ENABLE_CALLS=0 sudo -E bash matrix-installer.sh config"
+  case "$REG_MODE" in token) DEF_REG=2 ;; open) DEF_REG=3 ;; *) DEF_REG=1 ;; esac
+  [ "$ENABLE_CALLS" = "0" ] && DEF_CALLS="n" || DEF_CALLS="Y"
+  [ "$ENABLE_FEDERATION" = "1" ] && DEF_FED="y" || DEF_FED="N"
+  echo ""
+  echo "当前配置: 注册[$REG_MODE] · 通话[$([ "$ENABLE_CALLS" = "1" ] && echo 开启 || echo 关闭)] · 联邦[$([ "$ENABLE_FEDERATION" = "1" ] && echo 开启 || echo 关闭)]"
+  echo "下面重新选择,直接回车 = 保持当前值。"
+  REG_MODE=""; ENABLE_CALLS=""; ENABLE_FEDERATION=""
+fi
 
 if has_tty && { [ -z "$REG_MODE" ] || [ -z "$ENABLE_CALLS" ] || [ -z "$ENABLE_FEDERATION" ]; }; then
   cat <<'EOF'
@@ -183,7 +225,7 @@ EOF
       风险: 极高!垃圾账号灌爆、内容失控、服务器资源被白嫖,
             商业用途绝对不要选这个。
 EOF
-    ask_opt "→ 你的选择 [1/2/3,直接回车=1 关闭注册]: " "1"
+    ask_opt "→ 你的选择 [1/2/3,直接回车=$DEF_REG]: " "$DEF_REG"
     case "$REPLY" in
       2) REG_MODE=token ;;
       3) REG_MODE=open; warn "已选择开放注册 —— 请务必知晓上述风险!" ;;
@@ -207,7 +249,7 @@ EOF
       好处: 服务器内存吃紧(1GB)时更稳;需要的域名解析也少 2 条。
       风险: 无,以后想要了重装一次即可开启。
 EOF
-    ask_opt "→ 你的选择 [Y/n,直接回车=开启]: " "Y"
+    ask_opt "→ 你的选择 [Y/n,直接回车=$DEF_CALLS]: " "$DEF_CALLS"
     case "$REPLY" in n|N) ENABLE_CALLS=0 ;; *) ENABLE_CALLS=1 ;; esac
   fi
 
@@ -231,7 +273,7 @@ EOF
       风险: 对外暴露面变大;成员可能收到陌生人消息/钓鱼;
             你的服务器名对外部可见。商业保密场景不建议。
 EOF
-    ask_opt "→ 你的选择 [y/N,直接回车=关闭]: " "N"
+    ask_opt "→ 你的选择 [y/N,直接回车=$DEF_FED]: " "$DEF_FED"
     case "$REPLY" in y|Y) ENABLE_FEDERATION=1 ;; *) ENABLE_FEDERATION=0 ;; esac
   fi
 fi
@@ -262,7 +304,7 @@ echo "  ✔ 配置: 注册[$REG_MODE] · 通话[$([ "$ENABLE_CALLS" = "1" ] && e
 # ---------------------------------------------------------------------
 # 向导: 开工前把必须手动做的两件事讲清楚
 # ---------------------------------------------------------------------
-if has_tty; then
+if has_tty && [ "$RECONFIG" -eq 0 ]; then
   cat <<EOF
 
 ┌──────────────────────────────────────────────────────────┐
@@ -380,6 +422,9 @@ if command -v ufw >/dev/null 2>&1 || apt-get install -y -qq ufw >/dev/null 2>&1;
     ufw allow 443/udp >/dev/null
     if [ "$ENABLE_CALLS" = "1" ]; then
       ufw allow 7881/tcp >/dev/null; ufw allow 7882/udp >/dev/null
+    else
+      ufw delete allow 7881/tcp >/dev/null 2>&1 || true
+      ufw delete allow 7882/udp >/dev/null 2>&1 || true
     fi
     ufw --force enable >/dev/null
     echo "已放行: SSH(${SSH_PORT}) + ${PORT_LINE}"
@@ -393,18 +438,23 @@ if [ "$ENABLE_CALLS" = "1" ]; then
   warn "云服务商控制台的『安全组』也要放行: ${PORT_LINE} —— 漏开 7882/udp = 通话无声音画面!"
 else
   warn "云服务商控制台的『安全组』也要放行: ${PORT_LINE}"
+  if [ "$RECONFIG" -eq 1 ]; then
+    warn "已关闭通话:云安全组里的 7881/tcp、7882/udp 可以去删掉(系统防火墙已自动回收)。"
+  fi
 fi
 
 # ---------------------------------------------------------------------
 # 5. 安装目录与部署状态检测(幂等/断点续装)
 # ---------------------------------------------------------------------
-mkdir -p "$INSTALL_DIR" && cd "$INSTALL_DIR" && INSTALL_DIR="$PWD"
+mkdir -p "$INSTALL_DIR" || die "无法创建 $INSTALL_DIR"
+cd "$INSTALL_DIR" || die "无法进入 $INSTALL_DIR"
+INSTALL_DIR="$PWD"
 
 # 把脚本自身留一份在安装目录,以后 adduser/重装直接在这里执行。
 # curl|bash 管道模式下没有文件实体,则用 MATRIX_INSTALLER_URL(建站时可设)回源下载。
 SELF_DST="$INSTALL_DIR/matrix-installer.sh"
-if [ -f "${0:-}" ] && [ "$(cd "$(dirname "$0")" && pwd)/$(basename "$0")" != "$SELF_DST" ]; then
-  cp -f "$0" "$SELF_DST" 2>/dev/null || true
+if [ -n "$SELF_SRC" ] && [ "$SELF_SRC" != "$SELF_DST" ]; then
+  cp -f "$SELF_SRC" "$SELF_DST" 2>/dev/null || true
 elif [ ! -f "$SELF_DST" ] && [ -n "${MATRIX_INSTALLER_URL:-}" ]; then
   curl -fsSL "$MATRIX_INSTALLER_URL" -o "$SELF_DST" 2>/dev/null || true
 fi
@@ -415,10 +465,11 @@ if [ -f data/synapse/homeserver.yaml ] && grep -q "$MARKER" data/synapse/homeser
   OUR_CFG=1
 fi
 
-if [ "$OUR_CFG" -eq 1 ] && [ -f CREDENTIALS.txt ]; then
+if [ "$RECONFIG" -eq 0 ] && [ "$OUR_CFG" -eq 1 ] && [ -f CREDENTIALS.txt ]; then
   warn "检测到已完成的部署,只做重启,不改任何配置/密钥。"
   docker compose up -d
-  RUNNING="$(docker compose ps --status running -q 2>/dev/null | wc -l | tr -d ' ')"
+  RUNNING="$(docker compose ps --status running -q 2>/dev/null | wc -l | tr -d ' ' || true)"
+  RUNNING="${RUNNING:-0}"
   if [ "$RUNNING" -ge "$SVC_COUNT" ]; then
     echo "✓ $SVC_COUNT 个服务全部运行中。账号信息见 $INSTALL_DIR/CREDENTIALS.txt"
   else
@@ -428,7 +479,9 @@ if [ "$OUR_CFG" -eq 1 ] && [ -f CREDENTIALS.txt ]; then
   fi
   exit 0
 fi
-[ "$OUR_CFG" -eq 1 ] && warn "检测到未完成的部署,自动续装(复用已有密钥)。"
+if [ "$OUR_CFG" -eq 1 ] && [ ! -f CREDENTIALS.txt ]; then
+  warn "检测到未完成的部署,自动续装(复用已有密钥)。"
+fi
 
 # 80/443 占用预检(仅当占用者不是我们自己的 caddy)
 if ! docker compose ps -q caddy 2>/dev/null | grep -q .; then
@@ -632,6 +685,9 @@ webhook:
 turn:
   enabled: false
 EOF
+chmod 600 livekit/livekit.yaml
+else
+  rm -f livekit/livekit.yaml 2>/dev/null || true
 fi
 
 docker compose config -q || die "生成的 compose 配置校验失败"
@@ -762,8 +818,12 @@ chown -R 991:991 data/synapse
 # 8. 启动 + 证书验收
 # ---------------------------------------------------------------------
 bold "7/9 启动所有服务(首次拉镜像需几分钟)"
-docker compose pull -q || true
-docker compose up -d
+if [ "$RECONFIG" -eq 0 ]; then docker compose pull -q || true; fi
+docker compose up -d --remove-orphans
+if [ "$RECONFIG" -eq 1 ]; then
+  docker compose restart synapse caddy >/dev/null 2>&1 || true
+  echo "已按新配置重启核心服务。"
+fi
 
 bold "8/9 等待服务就绪"
 READY=0
@@ -777,11 +837,25 @@ for i in $(seq 1 60); do
 done
 [ "$READY" -eq 1 ] || warn "Synapse 启动较慢: cd $INSTALL_DIR && docker compose logs --tail 50 synapse"
 
+RUNNING_NOW="$(docker compose ps --status running -q 2>/dev/null | wc -l | tr -d ' ' || true)"
+RUNNING_NOW="${RUNNING_NOW:-0}"
+if [ "$RUNNING_NOW" -lt "$SVC_COUNT" ]; then
+  warn "当前 $RUNNING_NOW/$SVC_COUNT 个服务在运行,排查: cd $INSTALL_DIR && docker compose ps && docker compose logs --tail 50"
+fi
+
 CERT_OK=0
 echo "等待 HTTPS 证书签发(首次约 10-60 秒)…"
 for i in $(seq 1 36); do
   if curl -4 -fsS --max-time 5 "https://$M_HOST/_matrix/client/versions" >/dev/null 2>&1; then
-    CERT_OK=1; echo "✓ HTTPS 已生效: https://$M_HOST"; break
+    if [ "$ENABLE_CALLS" = "1" ]; then
+      if curl -4 -fsS --max-time 5 "https://$RTC_HOST/healthz" >/dev/null 2>&1 \
+         && curl -4 -fsS -o /dev/null --max-time 5 "https://$LK_HOST" >/dev/null 2>&1; then
+        CERT_OK=1
+      fi
+    else
+      CERT_OK=1
+    fi
+    if [ "$CERT_OK" -eq 1 ]; then echo "✓ HTTPS 已生效(全部域名)"; break; fi
   fi
   sleep 5
 done
@@ -794,11 +868,18 @@ fi
 # ---------------------------------------------------------------------
 # 9. 管理员账号(成功才写 CREDENTIALS.txt,作为“部署完成”的标志)
 # ---------------------------------------------------------------------
-bold "9/9 创建管理员"
+bold "9/9 管理员账号"
 ADMIN_USER="admin"
 ADMIN_PASS="$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | cut -c1-16)"
 ADMIN_OK=0
-if [ "$READY" -eq 1 ]; then
+ADMIN_INFO="   账号:    $ADMIN_USER
+   密码:    $ADMIN_PASS"
+if [ -f CREDENTIALS.txt ]; then
+  # 已有管理员(config/续跑场景):不动账号,不覆盖凭据
+  ADMIN_OK=1
+  ADMIN_INFO="   账号密码不变(见 $INSTALL_DIR/CREDENTIALS.txt)"
+  echo "已有管理员账号,跳过创建。"
+elif [ "$READY" -eq 1 ]; then
   if docker compose exec -T synapse register_new_matrix_user \
        -c /data/homeserver.yaml -u "$ADMIN_USER" -p "$ADMIN_PASS" -a \
        http://localhost:8008 >/dev/null 2>>install-error.log; then
@@ -806,7 +887,7 @@ if [ "$READY" -eq 1 ]; then
   fi
 fi
 
-if [ "$ADMIN_OK" -eq 1 ]; then
+if [ "$ADMIN_OK" -eq 1 ] && [ ! -f CREDENTIALS.txt ]; then
   cat > CREDENTIALS.txt <<EOF
 ==== Matrix 部署凭据  $DOMAIN  $(date '+%F %T') ====
 安装目录:      $INSTALL_DIR
@@ -840,18 +921,20 @@ if [ "$REG_MODE" = "token" ]; then
 "
 fi
 
+DONE_TITLE="🎉 部署完成!"
+if [ "$RECONFIG" -eq 1 ]; then DONE_TITLE="🎉 配置修改完成!"; fi
+
 if [ "$ADMIN_OK" -eq 1 ] && [ "$CERT_OK" -eq 1 ]; then
   cat <<EOF
 
 ========================================================
- 🎉 部署完成!  $DOMAIN
+ $DONE_TITLE  $DOMAIN
  (配置: 注册[$REG_MODE] · 通话[$([ "$ENABLE_CALLS" = "1" ] && echo 开 || echo 关)] · 联邦[$([ "$ENABLE_FEDERATION" = "1" ] && echo 开 || echo 关)])
 
  手机装 Element X,登录:
    服务器:  $DOMAIN
-   账号:    $ADMIN_USER
-   密码:    $ADMIN_PASS
- (凭据已存 $INSTALL_DIR/CREDENTIALS.txt)
+$ADMIN_INFO
+ (凭据存于 $INSTALL_DIR/CREDENTIALS.txt)
 
  添加团队成员:
    $ADDUSER_HINT
