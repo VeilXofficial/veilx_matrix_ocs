@@ -6,10 +6,10 @@
 #  组件: Caddy(自动HTTPS) + Synapse + PostgreSQL + LiveKit + lk-jwt-service
 #  客户端: Element X / Element Web / 任意 Matrix 客户端
 #
-#  用法(先把脚本下载/保存到服务器,再以 root 执行):
-#    bash matrix-installer.sh 你的域名.com
-#    bash matrix-installer.sh                # 不带参数则交互式询问
-#    bash matrix-installer.sh adduser        # 部署完后:添加团队成员
+#  用法(先把脚本下载到服务器,再以 root 执行):
+#    sudo bash matrix-installer.sh           # 标准用法:向导会询问域名
+#    sudo bash matrix-installer.sh mychat.org  # 高级用法:直接带域名参数
+#    sudo bash matrix-installer.sh adduser   # 部署完后:添加团队成员
 #
 #  前提: 4 条 DNS A 记录已指向本服务器公网 IP:
 #    你的域名.com  matrix.你的域名.com  livekit.你的域名.com  matrix-rtc.你的域名.com
@@ -84,19 +84,32 @@ if [ -f "$INSTALL_DIR/CREDENTIALS.txt" ] \
   exit 0
 fi
 
-DOMAIN="${1:-}"
-if [ -z "$DOMAIN" ]; then
-  PROMPT="请输入你的域名(如 example.com,将作为用户ID后缀 @名字:域名): "
+# ---- 域名获取与校验(向导式:填错不退出,重新问,直到填对) ----
+normalize_domain() {
+  echo "$1" | tr 'A-Z' 'a-z' | sed 's|^https\?://||; s|/.*$||' | tr -d '[:space:]'
+}
+domain_ok() {
+  # 只接受真实域名格式(字母数字点横线);中文、占位符、示例域名统统拦下
+  echo "$1" | grep -Eq '^[a-z0-9.-]+\.[a-z]{2,}$' || return 1
+  case "$1" in
+    example.com|example.org|example.net|yourdomain.*|mydomain.*|domain.com) return 1 ;;
+  esac
+  return 0
+}
+
+DOMAIN="$(normalize_domain "${1:-}")"
+until domain_ok "$DOMAIN"; do
+  [ -n "$DOMAIN" ] && warn "『$DOMAIN』不是可用的域名。需要一个你已经购买的真实域名(在 阿里云/腾讯云/Namecheap 等处几十元/年)。"
   if [ -t 0 ]; then
-    read -rp "$PROMPT" DOMAIN
-  elif [ -r /dev/tty ]; then
-    read -rp "$PROMPT" DOMAIN < /dev/tty
+    read -rp "请输入你的域名(直接输入,例如 mychat.org): " DOMAIN || die "已取消"
+  elif [ -e /dev/tty ]; then
+    read -rp "请输入你的域名(直接输入,例如 mychat.org): " DOMAIN < /dev/tty 2>/dev/null \
+      || die "读取输入失败。请带域名参数运行: sudo bash matrix-installer.sh 域名"
   else
-    die "检测不到交互终端(curl|bash 方式执行?)。请带参数运行: bash matrix-installer.sh 你的域名.com"
+    die "没有交互终端。请带域名参数运行: sudo bash matrix-installer.sh 域名 (例: sudo bash matrix-installer.sh mychat.org)"
   fi
-fi
-DOMAIN="$(echo "$DOMAIN" | tr 'A-Z' 'a-z' | sed 's|^https\?://||; s|/.*$||')"
-echo "$DOMAIN" | grep -Eq '^[a-z0-9.-]+\.[a-z]{2,}$' || die "域名格式不对: $DOMAIN"
+  DOMAIN="$(normalize_domain "$DOMAIN")"
+done
 
 ACME_EMAIL="${ACME_EMAIL:-admin@$DOMAIN}"
 M_HOST="matrix.$DOMAIN"
