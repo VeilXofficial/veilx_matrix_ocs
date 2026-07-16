@@ -2,9 +2,8 @@
 
 # Matrix 私有通讯服务器 · 一键部署
 
-**你的服务器,你的数据 —— 为商业机密保护而生的自托管团队通讯系统。你的服务器,你的数据 —— 为商业机密保护而生的自托管团队通讯系统 推荐使用ElementX客户端 VeilX客户端正在开发中，VeilX相比ElementX外观更加美观，整体更加易用，支持功能更多，修改Bug更快，代码开源可审计，运维团队设立在英国、新加坡、日本等地区。  客户资料、报价合同、内部讨论、语音视频会议 —— 全部只存在于你自己的服务器上。 一行命令部署,默认全封闭配置,不懂网络技术也能用:每个选择都有大白话说明。 基于 Matrix 开放协议,端到端加密,开源可审计。**
+**Matrix 私有通讯服务器 · 一键部署你的服务器,你的数据 —— 为商业机密保护而生的自托管团队通讯系统。你的服务器,你的数据 —— 为商业机密保护而生的自托管团队通讯系统 推荐使用ElementX客户端 VeilX客户端正在开发中，VeilX相比ElementX外观更加美观，整体更加易用，支持功能更多，修改Bug更快，代码开源可审计，运维团队设立在英国、新加坡、日本等地区。 客户资料、报价合同、内部讨论、语音视频会议 —— 全部只存在于你自己的服务器上。 一行命令部署,默认全封闭配置,不懂网络技术也能用:每个选择都有大白话说明。 基于 Matrix 开放协议,端到端加密,开源可审计。**
 
-客户资料、报价合同、内部讨论、语音视频会议 —— 全部只存在于你自己的服务器上。
 一行命令部署,默认全封闭配置,不懂网络技术也能用:每个选择都有大白话说明。
 基于 [Matrix](https://matrix.org) 开放协议,端到端加密,开源可审计。
 
@@ -27,15 +26,28 @@
 
 | 需要什么 | 具体要求 | 去哪儿弄 |
 |---|---|---|
-| **一台海外云服务器** | Ubuntu 22.04 或 24.04 系统,内存 ≥2GB,有公网 IP | 推荐 **CN2 GIA 线路**商家:[搬瓦工 BandwagonHost](https://bandwagonhost.com)、[DMIT](https://www.dmit.io)、HostDare、GigsGigsCloud 等 |
+| **一台海外云服务器** | Ubuntu 22.04 或 24.04 系统,有公网 IP;**推荐 2GB 内存**(1GB 也能装:安装时关闭通话选项,适合小团队纯文字) | 推荐 **CN2 GIA 线路**商家:[搬瓦工 BandwagonHost](https://bandwagonhost.com)、[DMIT](https://www.dmit.io)、HostDare、GigsGigsCloud 等 |
 | **一个域名** | 任意后缀都行(.com / .org / .net…) | [Namecheap](https://www.namecheap.com)、[Cloudflare](https://www.cloudflare.com/products/registrar/)、[Porkbun](https://porkbun.com) 等海外注册商,一年几十元 |
 | **10 分钟** | 全程复制粘贴,不需要会编程 | — |
 
 > 💡 **为什么选 CN2 GIA 线路?** 这是中国电信的高级国际线路,从国内访问延迟低、不绕路、晚高峰不卡,聊天秒发、通话流畅。普通便宜 VPS(Vultr/RackNerd 等)也能用,但国内连接质量看运气。
 > 💡 **为什么选海外商家?** 无需实名认证、无需备案,服务器和域名都不受国内监管约束——这正是自托管的意义。
 > 💡 买服务器时系统镜像务必选 **Ubuntu 22.04** 或 **24.04**。2GB 内存即可流畅供小团队使用(脚本会自动加虚拟内存优化)。
+> 💡 **按人数选配置**(日常同时活跃人数,纯文字图片;开通话请再升一档):1GB≈30 人以内 · 2GB≈100 人 · **4GB/2核≈200 人以上**。人多了可在服务商面板升级套餐(数据保留),再把 `/opt/matrix/.env` 里的 `SYNAPSE_MEM`/`POSTGRES_MEM` 调大并 `docker compose up -d` 即可。
 
 ---
+
+## 第 0 步:准备操作系统(买对了就跳过)
+
+本方案只支持 **Ubuntu 22.04 / 24.04**(或 Debian 11+)系统。
+
+- **新买服务器**:下单时「操作系统 / OS / Image」一栏选 **Ubuntu 22.04 x86_64**(或 24.04),本步就完成了
+- **已有服务器,但系统不对 / 不确定**:去服务商控制台找「重装系统 / Reinstall / Install new OS」,选 Ubuntu 22.04 重装
+  - 搬瓦工:KiwiVM 面板 → **Install new OS**
+  - DMIT:控制面板 → **Reinstall**
+  - ⚠️ 重装会**清空服务器上的全部数据**,新服务器无所谓,老服务器先备份
+- **怎么确认当前系统**:连上服务器(见第 3 步)后执行 `cat /etc/os-release`,看 `VERSION` 是不是 22.04 / 24.04
+- 装错了也不怕:脚本检测到不支持的系统会用中文明确告诉你,不会乱装
 
 ## 第 1 步:给域名添加 4 条解析记录(约 2 分钟)
 
@@ -87,12 +99,15 @@ ssh root@你的服务器IP
 
 ## 第 4 步:运行安装命令(约 5-10 分钟,全自动)
 
-连上服务器后,把下面两行**整体复制**粘贴进终端,回车:
+连上服务器后,把下面三行**整体复制**粘贴进终端,回车:
 
 ```bash
-wget -O matrix.sh https://raw.githubusercontent.com/VeilXofficial/veilx/main/server/matrix-installer.sh
+sudo apt-get update && sudo apt-get install -y wget
+wget -O matrix.sh https://raw.githubusercontent.com/VeilXofficial/veilx_matrix_ocs/main/matrix-installer.sh
 sudo bash matrix.sh
 ```
+
+> 📌 第一行是基础准备:刷新系统软件列表并装好下载工具(系统里已有就自动跳过,重复执行无害)。后面装 Docker、防火墙等所有系统准备,脚本会自己完成,不用你操心。
 
 接下来跟着**中文向导**走:
 
@@ -194,14 +209,14 @@ scp root@你的服务器IP:/opt/matrix/matrix-backup-*.tar.gz ~/Desktop/
 | 加密房间老消息"无法解密" | 正常:新设备没有历史密钥。在旧设备上对新设备做"验证会话"即可 |
 | 想彻底重装 | **先备份!**然后 `cd /opt/matrix && docker compose down`,`rm -rf /opt/matrix`,重跑安装命令 |
 
-## 📦 项目结构
+## 📦 仓库内容
 
 ```
-├── server/     一键服务器安装器(进阶文档:server/README.md)
-└── docs/       架构说明(docs/ARCHITECTURE.md)
+├── README.md              本说明文档
+└── matrix-installer.sh    一键安装脚本(全部逻辑都在这一个文件里,可自行审计)
 ```
 
-**服务端组件**:Caddy(自动 HTTPS)+ Synapse + PostgreSQL + LiveKit + lk-jwt-service,全部 Docker 编排,开源可审计。
+**装好后的服务端组件**:Caddy(自动 HTTPS)+ Synapse + PostgreSQL + LiveKit + lk-jwt-service,全部 Docker 编排,开源可审计。
 
 ## 📄 许可
 
