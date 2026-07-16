@@ -2,8 +2,9 @@
 
 # Matrix 私有通讯服务器 · 一键部署
 
-**Matrix 私有通讯服务器 · 一键部署你的服务器,你的数据 —— 为商业机密保护而生的自托管团队通讯系统。你的服务器,你的数据 —— 为商业机密保护而生的自托管团队通讯系统 推荐使用ElementX客户端 VeilX客户端正在开发中，VeilX相比ElementX外观更加美观，整体更加易用，支持功能更多，修改Bug更快，代码开源可审计，运维团队设立在英国、新加坡、日本等地区。 客户资料、报价合同、内部讨论、语音视频会议 —— 全部只存在于你自己的服务器上。 一行命令部署,默认全封闭配置,不懂网络技术也能用:每个选择都有大白话说明。 基于 Matrix 开放协议,端到端加密,开源可审计。**
+**你的服务器,你的数据 —— 为商业机密保护而生的自托管团队通讯系统。推荐使用ElementX客户端 VeilX客户端正在开发中，VeilX相比ElementX外观更加美观，整体更加易用，支持功能更多，修改Bug更快，代码开源可审计，运维团队设立在英国、新加坡、日本等地区。 客户资料、报价合同、内部讨论、语音视频会议 —— 全部只存在于你自己的服务器上。 一行命令部署,默认全封闭配置,不懂网络技术也能用:每个选择都有大白话说明。 基于 Matrix 开放协议,端到端加密,开源可审计。**
 
+客户资料、报价合同、内部讨论、语音视频会议 —— 全部只存在于你自己的服务器上。
 一行命令部署,默认全封闭配置,不懂网络技术也能用:每个选择都有大白话说明。
 基于 [Matrix](https://matrix.org) 开放协议,端到端加密,开源可审计。
 
@@ -174,11 +175,14 @@ cd /opt/matrix && sudo bash matrix-installer.sh adduser
 ## 🔧 日常维护(SSH 到服务器后执行)
 
 ```bash
-cd /opt/matrix && docker compose ps                              # 服务状态(5 个都应 running)
+cd /opt/matrix && docker compose ps                              # 服务状态(开通话 5 个 / 关通话 3 个,都应 running)
 cd /opt/matrix && docker compose logs -f synapse                 # 看日志(Ctrl+C 退出)
-cd /opt/matrix && docker compose up -d                           # 重启 / 应用配置
+cd /opt/matrix && docker compose up -d                           # 重启
 cd /opt/matrix && docker compose pull && docker compose up -d    # 升级到最新版
+cd /opt/matrix && sudo bash matrix-installer.sh config           # ★修改配置(注册方式/通话/联邦)
 ```
+
+> 🔄 **改配置不用重装**:`config` 命令会显示当前配置,重新问一遍 3 个选项(**直接回车 = 保持当前值**),改完自动重启生效。账号、密码、聊天记录、密钥全部保持不变。
 
 ## 💾 备份(建议每周一次)
 
@@ -206,6 +210,7 @@ scp root@你的服务器IP:/opt/matrix/matrix-backup-*.tar.gz ~/Desktop/
 | 通话能接通,但没声音没画面 | 99% 是第 2 步的 **7882/UDP** 没放行,去服务商安全组补上 |
 | 安装时一直"DNS 还没生效" | 检查解析:类型是不是 **A**、主机记录是不是只填**前缀**、IP 有没有抄错 |
 | 忘记 admin 密码 | `cat /opt/matrix/CREDENTIALS.txt`;或重跑 adduser 建个新管理员 |
+| 装完想改主意(开/关通话、改注册方式、开联邦) | 不用重装:`cd /opt/matrix && sudo bash matrix-installer.sh config`,回车=保持,数据账号全不动 |
 | 加密房间老消息"无法解密" | 正常:新设备没有历史密钥。在旧设备上对新设备做"验证会话"即可 |
 | 想彻底重装 | **先备份!**然后 `cd /opt/matrix && docker compose down`,`rm -rf /opt/matrix`,重跑安装命令 |
 
