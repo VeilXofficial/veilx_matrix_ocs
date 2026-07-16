@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 # =====================================================================
-#  Matrix 全功能一键安装脚本(通用版 v1.1)
+#  Matrix 全功能一键安装脚本(通用版 v1.2)
+#
+#  【本脚本为适应复杂商业环境、保护商业机密而开发】
+#  客户资料、报价合同、内部讨论、语音视频会议 —— 全部只存在于
+#  你自己的服务器上,端到端加密,默认全封闭配置,外部无法触达。
+#  面向不懂网络技术的使用者:每个选择都有大白话说明,回车即最安全默认。
+#
 #  在任意域名 + 任意 Ubuntu 22/24 / Debian 11+ 服务器上部署:
 #    聊天/群聊 + 图片视频文件互传 + 一对一及群组语音视频通话(E2EE)
 #  组件: Caddy(自动HTTPS) + Synapse + PostgreSQL + LiveKit + lk-jwt-service
@@ -18,6 +24,9 @@
 #    INSTALL_DIR=/opt/matrix   安装目录(默认)
 #    ACME_EMAIL=you@x.com      证书通知邮箱(默认 admin@域名)
 #    SKIP_DNS_CHECK=1          跳过 DNS 预检(走 CDN/代理时用,一般别用)
+#    REG_MODE=closed|token|open  注册方式(默认 closed=仅管理员建号)
+#    ENABLE_CALLS=1|0          语音视频通话(默认 1=开启)
+#    ENABLE_FEDERATION=1|0     联邦互通(默认 0=关闭,纯私密)
 #
 #  脚本可安全重复运行:已完成的部署只做重启;半途失败的部署会自动续装
 #  (密钥自动复用,不会因重跑而错乱)。
@@ -74,10 +83,12 @@ if [ -f "$INSTALL_DIR/CREDENTIALS.txt" ] \
   warn "检测到已完成的部署($INSTALL_DIR),只做重启,不改任何配置/密钥。"
   docker compose up -d
   RUNNING="$(docker compose ps --status running -q 2>/dev/null | wc -l | tr -d ' ')"
-  if [ "$RUNNING" -ge 5 ]; then
-    echo "✓ 5 个服务全部运行中。账号信息见 $INSTALL_DIR/CREDENTIALS.txt"
+  EXPECTED=5
+  grep -q '^ENABLE_CALLS=0' "$INSTALL_DIR/.env" 2>/dev/null && EXPECTED=3
+  if [ "$RUNNING" -ge "$EXPECTED" ]; then
+    echo "✓ $EXPECTED 个服务全部运行中。账号信息见 $INSTALL_DIR/CREDENTIALS.txt"
   else
-    warn "只有 $RUNNING/5 个服务在运行,排查:"
+    warn "只有 $RUNNING/$EXPECTED 个服务在运行,排查:"
     echo "  cd $INSTALL_DIR && docker compose ps"
     echo "  cd $INSTALL_DIR && docker compose logs --tail 50"
   fi
@@ -127,27 +138,147 @@ PUBLIC_IP="$(curl -4 -fsS --max-time 10 https://ifconfig.me 2>/dev/null \
 bold "目标: $DOMAIN  →  服务器 ${PUBLIC_IP:-未知}  →  目录 $INSTALL_DIR"
 
 # ---------------------------------------------------------------------
+# 安装选项(回车 = 推荐默认;重跑时自动沿用上次选择;可用环境变量预设)
+# ---------------------------------------------------------------------
+env_saved() { grep -E "^$1=" "$INSTALL_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2- || true; }
+ask_opt() {  # $1=提示 $2=默认值 → 结果放入 REPLY
+  REPLY=""
+  if [ -t 0 ]; then read -rp "$1" REPLY || true
+  elif [ -e /dev/tty ]; then read -rp "$1" REPLY < /dev/tty 2>/dev/null || true
+  fi
+  [ -n "$REPLY" ] || REPLY="$2"
+}
+
+REG_MODE="${REG_MODE:-$(env_saved REG_MODE)}"
+ENABLE_CALLS="${ENABLE_CALLS:-$(env_saved ENABLE_CALLS)}"
+ENABLE_FEDERATION="${ENABLE_FEDERATION:-$(env_saved ENABLE_FEDERATION)}"
+
+if has_tty && { [ -z "$REG_MODE" ] || [ -z "$ENABLE_CALLS" ] || [ -z "$ENABLE_FEDERATION" ]; }; then
+  cat <<'EOF'
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ 安装选项:共 3 个,每个都有大白话说明。
+ 看不懂或拿不准 → 直接按回车,用推荐值(已是商业保密最安全组合)。
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+EOF
+
+  if [ -z "$REG_MODE" ]; then
+    cat <<'EOF'
+
+【选项 1/3】注册方式 —— 决定"谁有资格在你的服务器上开账号"
+
+  [1] 关闭注册(推荐)
+      作用: 服务器不存在"注册"入口,账号只能由管理员亲手创建。
+      好处: 外人连门都摸不到,员工离职即删号,商业环境最安全。
+      风险: 无。代价只是新成员要找管理员开号(一条命令的事)。
+
+  [2] 邀请码注册
+      作用: 你生成邀请码发给谁,谁才能自己注册。
+      好处: 成员多时不用逐个建号,发码即可。
+      风险: 邀请码一旦外泄,拿到码的陌生人就能进来 —— 记得发完即作废。
+
+  [3] 完全开放注册
+      作用: 互联网上任何人都可以注册你的服务器。
+      好处: 仅当你想运营一个对公众开放的社区时才有意义。
+      风险: 极高!垃圾账号灌爆、内容失控、服务器资源被白嫖,
+            商业用途绝对不要选这个。
+EOF
+    ask_opt "→ 你的选择 [1/2/3,直接回车=1 关闭注册]: " "1"
+    case "$REPLY" in
+      2) REG_MODE=token ;;
+      3) REG_MODE=open; warn "已选择开放注册 —— 请务必知晓上述风险!" ;;
+      *) REG_MODE=closed ;;
+    esac
+  fi
+
+  if [ -z "$ENABLE_CALLS" ]; then
+    cat <<'EOF'
+
+【选项 2/3】语音/视频通话 —— 要不要安装"打电话/开会"的组件
+
+  [Y] 开启(推荐)
+      作用: 支持一对一通话和多人视频会议,画面声音端到端加密,
+            媒体流只经过你自己的服务器,不经任何第三方。
+      好处: 团队开会不再用腾讯会议/Zoom 之类的外部平台,会议内容不外流。
+      风险: 无安全风险。代价是多占约 300MB 内存,防火墙多开 2 个端口。
+
+  [n] 关闭
+      作用: 只保留文字聊天和文件互传。
+      好处: 服务器内存吃紧(1GB)时更稳;需要的域名解析也少 2 条。
+      风险: 无,以后想要了重装一次即可开启。
+EOF
+    ask_opt "→ 你的选择 [Y/n,直接回车=开启]: " "Y"
+    case "$REPLY" in n|N) ENABLE_CALLS=0 ;; *) ENABLE_CALLS=1 ;; esac
+  fi
+
+  if [ -z "$ENABLE_FEDERATION" ]; then
+    cat <<'EOF'
+
+【选项 3/3】联邦互通 —— 你的服务器要不要与"外部 Matrix 世界"相连
+
+  说明: Matrix 是个像"邮箱"一样的开放网络,全世界有成千上万台
+        Matrix 服务器(如 matrix.org)。"联邦"就是与它们互联互通。
+
+  [N] 关闭,完全封闭(推荐)
+      作用: 你的服务器成为一座孤岛,只有你建的账号之间能聊天。
+      好处: 外部任何服务器、任何陌生人都无法向你的成员发消息,
+            没有骚扰、没有钓鱼、攻击面最小 —— 保护商业机密的首选。
+      风险: 无。代价是成员不能和其他 Matrix 服务器上的朋友聊天。
+
+  [y] 开启
+      作用: 你的成员可以和 matrix.org 等任意服务器的用户互加互聊。
+      好处: 融入全球开放网络,跨公司协作方便。
+      风险: 对外暴露面变大;成员可能收到陌生人消息/钓鱼;
+            你的服务器名对外部可见。商业保密场景不建议。
+EOF
+    ask_opt "→ 你的选择 [y/N,直接回车=关闭]: " "N"
+    case "$REPLY" in y|Y) ENABLE_FEDERATION=1 ;; *) ENABLE_FEDERATION=0 ;; esac
+  fi
+fi
+REG_MODE="${REG_MODE:-closed}"
+ENABLE_CALLS="${ENABLE_CALLS:-1}"
+ENABLE_FEDERATION="${ENABLE_FEDERATION:-0}"
+case "$REG_MODE" in closed|token|open) : ;; *) die "REG_MODE 只能是 closed/token/open,收到: $REG_MODE" ;; esac
+
+# 由选项派生的清单(DNS 记录 / 端口 / 服务数)
+if [ "$ENABLE_CALLS" = "1" ]; then
+  REQUIRED_HOSTS="$DOMAIN $M_HOST $LK_HOST $RTC_HOST"
+  DNS_LINES="      $DOMAIN
+      $M_HOST
+      $LK_HOST
+      $RTC_HOST"
+  PORT_LINE="80/tcp   443/tcp   443/udp   7881/tcp   7882/udp"
+  SVC_COUNT=5
+else
+  REQUIRED_HOSTS="$DOMAIN $M_HOST"
+  DNS_LINES="      $DOMAIN
+      $M_HOST"
+  PORT_LINE="80/tcp   443/tcp   443/udp"
+  SVC_COUNT=3
+fi
+echo ""
+echo "  ✔ 配置: 注册[$REG_MODE] · 通话[$([ "$ENABLE_CALLS" = "1" ] && echo 开启 || echo 关闭)] · 联邦[$([ "$ENABLE_FEDERATION" = "1" ] && echo 开启 || echo 关闭)]"
+
+# ---------------------------------------------------------------------
 # 向导: 开工前把必须手动做的两件事讲清楚
 # ---------------------------------------------------------------------
 if has_tty; then
   cat <<EOF
 
 ┌──────────────────────────────────────────────────────────┐
-│  Matrix 一键安装向导                                     │
+│  Matrix 一键安装向导 · 为商业保密而生                    │
+│  聊天/文件/会议全部只存在你自己的服务器,外人无法触达    │
 └──────────────────────────────────────────────────────────┘
-接下来全自动完成(约 5-10 分钟):装 Docker → 起 5 个服务 →
+接下来全自动完成(约 5-10 分钟):装 Docker → 启动服务 →
 自动申请 HTTPS 证书 → 生成全部密码 → 创建管理员 → 给你登录信息。
 
 只有两件事必须你在【网页后台】手动做(脚本替代不了):
 
- ① 域名商后台 → 添加 4 条 A 记录,全部指向 ${PUBLIC_IP:-本服务器IP}:
-      $DOMAIN
-      $M_HOST
-      $LK_HOST
-      $RTC_HOST
+ ① 域名商后台 → 添加下列 A 记录,全部指向 ${PUBLIC_IP:-本服务器IP}:
+$DNS_LINES
 
  ② 服务器商控制台 → 安全组/防火墙 放行这些端口:
-      80/tcp   443/tcp   443/udp   7881/tcp   7882/udp
+      $PORT_LINE
     (后台里找不到"安全组"设置的服务商,跳过这条即可)
 
 EOF
@@ -160,7 +291,7 @@ fi
 # ---------------------------------------------------------------------
 dns_check() {  # 返回 0=全部正确
   local bad=0 h R4
-  for h in "$DOMAIN" "$M_HOST" "$LK_HOST" "$RTC_HOST"; do
+  for h in $REQUIRED_HOSTS; do
     # 收集全部 IPv4(排除环回),避免 AAAA/多记录误判
     R4="$(getent ahosts "$h" 2>/dev/null | awk '{print $1}' \
           | grep -E '^[0-9]+\.' | grep -Ev '^127\.' | sort -u || true)"
@@ -246,17 +377,23 @@ SSH_PORT="${SSH_PORT:-22}"
 if command -v ufw >/dev/null 2>&1 || apt-get install -y -qq ufw >/dev/null 2>&1; then
   if ufw allow "${SSH_PORT}/tcp" >/dev/null 2>&1; then
     ufw allow 80/tcp >/dev/null;   ufw allow 443/tcp >/dev/null
-    ufw allow 443/udp >/dev/null;  ufw allow 7881/tcp >/dev/null
-    ufw allow 7882/udp >/dev/null
+    ufw allow 443/udp >/dev/null
+    if [ "$ENABLE_CALLS" = "1" ]; then
+      ufw allow 7881/tcp >/dev/null; ufw allow 7882/udp >/dev/null
+    fi
     ufw --force enable >/dev/null
-    echo "已放行 SSH(${SSH_PORT})/80/443(tcp+udp)/7881(tcp)/7882(udp)。"
+    echo "已放行: SSH(${SSH_PORT}) + ${PORT_LINE}"
   else
     warn "ufw 在当前环境不可用(容器/内核限制),请自行放行端口。"
   fi
 else
   warn "ufw 不可用,请自行放行端口。"
 fi
-warn "云服务商控制台的『安全组』也要放行: 80,443(tcp+udp),7881/tcp,7882/udp —— 漏开 7882/udp = 通话无声音画面!"
+if [ "$ENABLE_CALLS" = "1" ]; then
+  warn "云服务商控制台的『安全组』也要放行: ${PORT_LINE} —— 漏开 7882/udp = 通话无声音画面!"
+else
+  warn "云服务商控制台的『安全组』也要放行: ${PORT_LINE}"
+fi
 
 # ---------------------------------------------------------------------
 # 5. 安装目录与部署状态检测(幂等/断点续装)
@@ -282,10 +419,10 @@ if [ "$OUR_CFG" -eq 1 ] && [ -f CREDENTIALS.txt ]; then
   warn "检测到已完成的部署,只做重启,不改任何配置/密钥。"
   docker compose up -d
   RUNNING="$(docker compose ps --status running -q 2>/dev/null | wc -l | tr -d ' ')"
-  if [ "$RUNNING" -ge 5 ]; then
-    echo "✓ 5 个服务全部运行中。账号信息见 $INSTALL_DIR/CREDENTIALS.txt"
+  if [ "$RUNNING" -ge "$SVC_COUNT" ]; then
+    echo "✓ $SVC_COUNT 个服务全部运行中。账号信息见 $INSTALL_DIR/CREDENTIALS.txt"
   else
-    warn "只有 $RUNNING/5 个服务在运行,排查:"
+    warn "只有 $RUNNING/$SVC_COUNT 个服务在运行,排查:"
     echo "  cd $INSTALL_DIR && docker compose ps"
     echo "  cd $INSTALL_DIR && docker compose logs --tail 50"
   fi
@@ -321,6 +458,9 @@ LIVEKIT_API_SECRET=$LK_SECRET
 REG_SECRET=$REG_SECRET
 MACAROON=$MACAROON
 FORM_SECRET=$FORM_SECRET
+REG_MODE=$REG_MODE
+ENABLE_CALLS=$ENABLE_CALLS
+ENABLE_FEDERATION=$ENABLE_FEDERATION
 SYNAPSE_MEM=$SYNAPSE_MEM
 POSTGRES_MEM=$POSTGRES_MEM
 LIVEKIT_MEM=$LIVEKIT_MEM
@@ -363,6 +503,11 @@ services:
     mem_limit: ${SYNAPSE_MEM}
     networks: [internal]
 
+EOF
+
+# 通话相关服务(可选)
+if [ "$ENABLE_CALLS" = "1" ]; then
+cat >> docker-compose.yml <<'EOF'
   lk-jwt-service:
     image: ghcr.io/element-hq/lk-jwt-service:latest
     restart: unless-stopped
@@ -392,10 +537,14 @@ services:
     mem_limit: ${LIVEKIT_MEM}
     networks: [internal]
 
+EOF
+fi
+
+cat >> docker-compose.yml <<'EOF'
   caddy:
     image: caddy:2
     restart: unless-stopped
-    depends_on: [synapse, livekit, lk-jwt-service]
+    depends_on: [synapse]
     ports:
       - "80:80"
       - "443:443"
@@ -413,6 +562,13 @@ networks:
 EOF
 
 # ---- Caddyfile ----
+# well-known/client 内容按“是否开通话”组装(rtc_foci 只在开通话时下发)
+if [ "$ENABLE_CALLS" = "1" ]; then
+  CLIENT_WK="{\"m.homeserver\":{\"base_url\":\"https://$M_HOST\"},\"org.matrix.msc4143.rtc_foci\":[{\"type\":\"livekit\",\"livekit_service_url\":\"https://$RTC_HOST\"}]}"
+else
+  CLIENT_WK="{\"m.homeserver\":{\"base_url\":\"https://$M_HOST\"}}"
+fi
+
 cat > Caddyfile <<EOF
 {
 	email $ACME_EMAIL
@@ -428,7 +584,7 @@ $DOMAIN {
 	handle /.well-known/matrix/client {
 		header Content-Type application/json
 		header Access-Control-Allow-Origin *
-		respond \`{"m.homeserver":{"base_url":"https://$M_HOST"},"org.matrix.msc4143.rtc_foci":[{"type":"livekit","livekit_service_url":"https://$RTC_HOST"}]}\` 200
+		respond \`$CLIENT_WK\` 200
 	}
 	handle {
 		respond "$DOMAIN — Matrix server" 200
@@ -438,6 +594,10 @@ $DOMAIN {
 $M_HOST {
 	reverse_proxy synapse:8008
 }
+EOF
+
+if [ "$ENABLE_CALLS" = "1" ]; then
+cat >> Caddyfile <<EOF
 
 $LK_HOST {
 	reverse_proxy livekit:7880
@@ -447,8 +607,10 @@ $RTC_HOST {
 	reverse_proxy lk-jwt-service:8080
 }
 EOF
+fi
 
-# ---- livekit.yaml(webhook 走容器内网,不绕公网) ----
+# ---- livekit.yaml(仅开通话时生成;webhook 走容器内网,不绕公网) ----
+if [ "$ENABLE_CALLS" = "1" ]; then
 mkdir -p livekit
 cat > livekit/livekit.yaml <<EOF
 port: 7880
@@ -470,6 +632,7 @@ webhook:
 turn:
   enabled: false
 EOF
+fi
 
 docker compose config -q || die "生成的 compose 配置校验失败"
 
@@ -486,6 +649,15 @@ if [ ! -f "data/synapse/$DOMAIN.signing.key" ]; then
     matrixdotorg/synapse:latest generate >/dev/null
 fi
 
+# 监听资源按选项决定:联邦开→federation;仅通话→openid(通话授权必需);全关→client
+if [ "$ENABLE_FEDERATION" = "1" ]; then
+  SYN_RESOURCES="client, federation"
+elif [ "$ENABLE_CALLS" = "1" ]; then
+  SYN_RESOURCES="client, openid"
+else
+  SYN_RESOURCES="client"
+fi
+
 cat > data/synapse/homeserver.yaml <<EOF
 # ===== $MARKER($(date +%F))=====
 server_name: "$DOMAIN"
@@ -500,7 +672,7 @@ listeners:
     x_forwarded: true
     bind_addresses: ['0.0.0.0']
     resources:
-      - names: [client, federation]   # federation 含 openid,通话授权依赖,勿删
+      - names: [$SYN_RESOURCES]
         compress: false
 
 database:
@@ -531,7 +703,13 @@ caches:
   global_factor: $CACHE_FACTOR
   event_cache_size: "$EVENT_CACHE"
 
-# ---- Element Call / MatrixRTC 群组通话必需 ----
+allow_public_rooms_over_federation: false
+EOF
+
+# ---- 通话(Element Call / MatrixRTC)所需开关 ----
+if [ "$ENABLE_CALLS" = "1" ]; then
+cat >> data/synapse/homeserver.yaml <<EOF
+
 experimental_features:
   msc3266_enabled: true
   msc4222_enabled: true
@@ -542,11 +720,41 @@ rc_message:
 rc_delayed_event_mgmt:
   per_second: 1.0
   burst_count: 20
-
-# ---- 私有团队安全默认 ----
-enable_registration: false
-allow_public_rooms_over_federation: false
 EOF
+fi
+
+# ---- 注册方式 ----
+case "$REG_MODE" in
+  token)
+    cat >> data/synapse/homeserver.yaml <<EOF
+
+enable_registration: true
+registration_requires_token: true
+EOF
+    ;;
+  open)
+    cat >> data/synapse/homeserver.yaml <<EOF
+
+enable_registration: true
+enable_registration_without_verification: true
+EOF
+    ;;
+  *)
+    cat >> data/synapse/homeserver.yaml <<EOF
+
+enable_registration: false
+EOF
+    ;;
+esac
+
+# ---- 联邦 ----
+if [ "$ENABLE_FEDERATION" != "1" ]; then
+cat >> data/synapse/homeserver.yaml <<EOF
+
+# 联邦关闭:不与任何外部服务器互通
+federation_domain_whitelist: []
+EOF
+fi
 
 chown -R 991:991 data/synapse
 
@@ -621,11 +829,23 @@ else
   ADDUSER_HINT="cd $INSTALL_DIR && docker compose exec synapse register_new_matrix_user -c /data/homeserver.yaml http://localhost:8008"
 fi
 
+CALL_CHECK_LINE=""
+[ "$ENABLE_CALLS" = "1" ] && CALL_CHECK_LINE="   curl -s https://$RTC_HOST/healthz -o /dev/null -w '%{http_code}\\n'   # 通话授权,应输出 200"
+
+TOKEN_HINT=""
+if [ "$REG_MODE" = "token" ]; then
+  TOKEN_HINT=" 生成注册邀请码(成员自助注册用):
+   打开 https://admin.etke.cc 用 admin 登录 → Registration tokens → 创建
+   成员注册时填邀请码即可(可用浏览器打开 https://app.element.io 注册)
+"
+fi
+
 if [ "$ADMIN_OK" -eq 1 ] && [ "$CERT_OK" -eq 1 ]; then
   cat <<EOF
 
 ========================================================
  🎉 部署完成!  $DOMAIN
+ (配置: 注册[$REG_MODE] · 通话[$([ "$ENABLE_CALLS" = "1" ] && echo 开 || echo 关)] · 联邦[$([ "$ENABLE_FEDERATION" = "1" ] && echo 开 || echo 关)])
 
  手机装 Element X,登录:
    服务器:  $DOMAIN
@@ -636,14 +856,14 @@ if [ "$ADMIN_OK" -eq 1 ] && [ "$CERT_OK" -eq 1 ]; then
  添加团队成员:
    $ADDUSER_HINT
  (或网页后台 https://admin.etke.cc,Homeserver 填 https://$M_HOST)
-
+$TOKEN_HINT
  自检:
    curl -s https://$DOMAIN/.well-known/matrix/client
-   curl -s https://$RTC_HOST/healthz -o /dev/null -w '%{http_code}\n'
-   cd $INSTALL_DIR && docker compose ps    # 5 个容器都应 running
+$CALL_CHECK_LINE
+   cd $INSTALL_DIR && docker compose ps    # $SVC_COUNT 个容器都应 running
    浏览器: https://federationtester.matrix.org/#$DOMAIN
 
- ⚠️ 云安全组记得放行: 80,443(tcp+udp),7881/tcp,7882/udp
+ ⚠️ 云安全组记得放行: $PORT_LINE
 ========================================================
 EOF
 else
