@@ -2,6 +2,14 @@
 # =====================================================================
 #  Matrix 全功能一键安装脚本(通用版 v1.2)
 #
+#  License: PolyForm Noncommercial 1.0.0 —— 个人/非商业使用免费;
+#  ★除作者外禁止任何商业用途★,商业授权请联系作者(GitHub 提 Issue)。
+#  ★特别声明:禁止在淘宝、闲鱼(咸鱼)、拼多多、京东、抖音/快手小店、微店、
+#    转转等一切电商及二手平台售卖本脚本;禁止收费代装、代部署、捆绑倒卖
+#    等类似牟利行为 —— 发现即举报并依许可证追责。★
+#  Required Notice: Copyright (c) 2026 VeilXofficial
+#  https://github.com/VeilXofficial/veilx_matrix_ocs (全文见仓库 LICENSE)
+#
 #  【本脚本为适应复杂商业环境、保护商业机密而开发】
 #  客户资料、报价合同、内部讨论、语音视频会议 —— 全部只存在于
 #  你自己的服务器上,端到端加密,默认全封闭配置,外部无法触达。
@@ -17,6 +25,8 @@
 #    sudo bash matrix-installer.sh mychat.org  # 高级用法:直接带域名参数
 #    sudo bash matrix-installer.sh adduser   # 部署完后:添加团队成员
 #    sudo bash matrix-installer.sh config    # 部署完后:修改配置(注册/通话/联邦)
+#    sudo bash matrix-installer.sh uninstall # 彻底卸载(双重确认,先提示备份)
+#  部署完成后,直接重跑本脚本 = 打开中文管理菜单(状态/加人/改配置/备份/升级/重启/卸载)
 #
 #  前提: 4 条 DNS A 记录已指向本服务器公网 IP:
 #    你的域名.com  matrix.你的域名.com  livekit.你的域名.com  matrix-rtc.你的域名.com
@@ -51,6 +61,49 @@ press_enter() {
   fi
 }
 
+# ---- 管理菜单用的两个功能:状态一览 / 一键备份 ----
+menu_status() {
+  cd "$INSTALL_DIR"
+  local d; d="$(env_saved MATRIX_DOMAIN)"
+  echo ""
+  echo "── 当前配置 ──"
+  echo "  域名: ${d:-未知}   注册: $(env_saved REG_MODE)   通话: $([ "$(env_saved ENABLE_CALLS)" = "0" ] && echo 关 || echo 开)   联邦: $([ "$(env_saved ENABLE_FEDERATION)" = "1" ] && echo 开 || echo 关)"
+  echo "── 容器状态 ──"
+  docker compose ps 2>/dev/null || true
+  echo "── 资源占用 ──"
+  echo "  数据大小: $(du -sh data 2>/dev/null | cut -f1)    磁盘剩余: $(df -h . 2>/dev/null | awk 'NR==2{print $4}')"
+  free -h 2>/dev/null | awk 'NR<=2{print "  "$0}' || true
+  echo "── 在线检查 ──"
+  if curl -4 -fsS --max-time 8 "https://matrix.${d}/_matrix/client/versions" >/dev/null 2>&1; then
+    echo "  ✓ https://matrix.${d} 正常(证书有效,服务在线)"
+  else
+    warn "matrix.${d} 当前无法访问 —— 排查: docker compose logs --tail 30 caddy"
+  fi
+  echo "  账号凭据: $INSTALL_DIR/CREDENTIALS.txt"
+}
+
+menu_backup() {
+  cd "$INSTALL_DIR"
+  local ts f; ts="$(date +%F-%H%M%S)"; f="$INSTALL_DIR/matrix-backup-$ts.tar.gz"
+  umask 077   # 备份含全部密钥,生成的中间文件与压缩包仅 root 可读
+  echo "==> 导出数据库…"
+  if ! docker compose exec -T postgres pg_dump -U synapse synapse 2>/dev/null | gzip > "db-backup-$ts.sql.gz"; then
+    warn "数据库导出失败(服务未运行?),将只备份密钥与配置"
+  fi
+  echo "==> 打包密钥+配置+数据库(聊天媒体文件较大不包含,在 data/synapse/media_store)…"
+  tar czf "$f" .env CREDENTIALS.txt "db-backup-$ts.sql.gz" \
+      data/synapse/*.signing.key data/synapse/homeserver.yaml 2>/dev/null || true
+  chmod 600 "$f" 2>/dev/null || true
+  rm -f "db-backup-$ts.sql.gz"
+  if [ -s "$f" ]; then
+    echo "✓ 备份完成: $f($(du -h "$f" | cut -f1))"
+    echo "  下载到自己电脑(在你电脑的终端执行):"
+    echo "    scp root@服务器IP:$f ~/Desktop/"
+  else
+    warn "备份失败"
+  fi
+}
+
 # 非 root 时自动提权(有脚本文件用 sudo 重跑;curl|bash 无文件则提示)
 if [ "$(id -u)" -ne 0 ]; then
   if [ -f "${0:-}" ] && command -v sudo >/dev/null 2>&1; then
@@ -81,6 +134,59 @@ if [ "${1:-}" = "adduser" ]; then
 fi
 
 # ---------------------------------------------------------------------
+# 子命令: uninstall —— 彻底卸载(危险操作,双重确认)
+# ---------------------------------------------------------------------
+if [ "${1:-}" = "uninstall" ]; then
+  [ -t 0 ] || die "uninstall 必须在交互终端里执行(防误删)"
+  [ -d "$INSTALL_DIR" ] || die "没有找到安装目录 $INSTALL_DIR,无需卸载"
+  # 安全护栏:只允许删除"确实是本脚本部署的目录",且绝不碰危险路径
+  INSTALL_DIR="$(readlink -f -- "$INSTALL_DIR" 2>/dev/null || echo "$INSTALL_DIR")"
+  case "$INSTALL_DIR" in
+    ""|/|/root|/home|/usr|/etc|/var|/bin|/boot|/lib*|/opt|/srv|/sys|/proc|/dev)
+      die "拒绝删除危险路径 [$INSTALL_DIR]。uninstall 只删除脚本创建的独立安装目录" ;;
+  esac
+  grep -q "$MARKER" "$INSTALL_DIR/data/synapse/homeserver.yaml" 2>/dev/null \
+    || die "[$INSTALL_DIR] 不像是本脚本部署的目录(缺少标识),拒绝删除。"
+  UN_DOMAIN="$(grep -E '^MATRIX_DOMAIN=' "$INSTALL_DIR/.env" 2>/dev/null | cut -d= -f2- || true)"
+
+  cat <<EOF
+
+┌──────────────────────────────────────────────────────────┐
+│  ⚠️  彻底卸载 Matrix 服务器${UN_DOMAIN:+($UN_DOMAIN)}
+└──────────────────────────────────────────────────────────┘
+将会永久删除(无法恢复!):
+  · 全部聊天记录、图片视频文件
+  · 全部用户账号与密钥
+  · 数据库、证书、所有配置($INSTALL_DIR 整个目录)
+保留不动:Docker 本体、系统防火墙规则、swap。
+
+强烈建议先备份!备份命令(先按 Ctrl+C 退出卸载再执行):
+  cd $INSTALL_DIR && docker compose exec -T postgres pg_dump -U synapse synapse | gzip > db-backup.sql.gz
+  tar czf ~/matrix-backup.tar.gz -C $INSTALL_DIR .env CREDENTIALS.txt db-backup.sql.gz data/synapse
+
+EOF
+  read -rp "第 1 次确认:真的要卸载吗?输入 yes 继续: " R1 || exit 1
+  [ "$R1" = "yes" ] || { echo "已取消,什么都没动。"; exit 0; }
+  if [ -n "$UN_DOMAIN" ]; then
+    read -rp "第 2 次确认:请输入你的域名【$UN_DOMAIN】以确认删除: " R2 || exit 1
+    [ "$R2" = "$UN_DOMAIN" ] || { echo "域名不匹配,已取消,什么都没动。"; exit 0; }
+  else
+    read -rp "第 2 次确认:请输入大写 DELETE 以确认删除: " R2 || exit 1
+    [ "$R2" = "DELETE" ] || { echo "输入不匹配,已取消,什么都没动。"; exit 0; }
+  fi
+
+  echo "==> 停止并移除容器…"
+  ( cd "$INSTALL_DIR" && docker compose down --remove-orphans ) 2>/dev/null || true
+  echo "==> 删除全部数据与配置…"
+  rm -rf "$INSTALL_DIR"
+  echo ""
+  echo "✅ 卸载完成。$INSTALL_DIR 已删除,容器已移除。"
+  echo "   如需连 Docker 镜像也清掉: docker image prune -a"
+  echo "   如需重新安装:重新运行本脚本即可。"
+  exit 0
+fi
+
+# ---------------------------------------------------------------------
 # 子命令: config —— 修改已部署实例的配置(注册方式/通话/联邦)
 # 走与安装相同的生成流程,但重新询问三个选项(回车=保持当前值)
 # ---------------------------------------------------------------------
@@ -95,10 +201,57 @@ fi
 # ---------------------------------------------------------------------
 [ "$(id -u)" -eq 0 ] || die "需要 root 权限。请用: sudo bash matrix-installer.sh 域名  (网站管道方式: curl -fsSL 网址 | sudo bash -s -- 域名)"
 
-# 已完成的部署直接快速重启,不再走向导(重跑体验更顺;config 模式除外)
+# 已完成的部署:有终端 → 打开管理菜单;无终端(自动化)→ 只做重启
 if [ "$RECONFIG" -eq 0 ] && [ -f "$INSTALL_DIR/CREDENTIALS.txt" ] \
    && grep -q "$MARKER" "$INSTALL_DIR/data/synapse/homeserver.yaml" 2>/dev/null; then
   cd "$INSTALL_DIR"
+  SELF_BIN="$INSTALL_DIR/matrix-installer.sh"
+  if [ ! -f "$SELF_BIN" ] && [ -f "${0:-}" ]; then cp -f "$0" "$SELF_BIN" 2>/dev/null || true; fi
+
+  if has_tty; then
+    MENU_DOMAIN="$(env_saved MATRIX_DOMAIN)"
+    while :; do
+      cat <<EOF
+
+┌──────────────────────────────────────────────┐
+│  Matrix 管理菜单   ${MENU_DOMAIN:-}
+└──────────────────────────────────────────────┘
+  1) 查看运行状态
+  2) 添加团队成员
+  3) 修改配置(注册 / 通话 / 联邦)
+  4) 立即备份(数据库 + 密钥 + 配置)
+  5) 升级到最新版本
+  6) 重启所有服务
+  7) 彻底卸载
+  0) 退出
+EOF
+      MCHOICE=""
+      if [ -t 0 ]; then read -rp "请选择 [0-7]: " MCHOICE || exit 0
+      else read -rp "请选择 [0-7]: " MCHOICE < /dev/tty 2>/dev/null || exit 0; fi
+      case "$MCHOICE" in
+        1) menu_status ;;
+        2) if [ -f "$SELF_BIN" ]; then bash "$SELF_BIN" adduser || true
+           else warn "缺少脚本副本,手动执行: docker compose exec synapse register_new_matrix_user -c /data/homeserver.yaml http://localhost:8008"; fi ;;
+        3) if [ -f "$SELF_BIN" ]; then INSTALL_DIR="$INSTALL_DIR" bash "$SELF_BIN" config || true
+           else warn "缺少脚本副本,无法进入改配置"; fi ;;
+        4) menu_backup ;;
+        5) echo "==> 拉取最新镜像并升级…"
+           { docker compose pull -q && docker compose up -d --remove-orphans && echo "✓ 升级完成"; } \
+             || warn "升级失败,查看: docker compose logs --tail 30" ;;
+        6) { docker compose up -d && docker compose restart; } >/dev/null 2>&1 \
+             && echo "✓ 已重启全部服务" || warn "重启失败,查看: docker compose ps" ;;
+        7) if [ -f "$SELF_BIN" ]; then INSTALL_DIR="$INSTALL_DIR" bash "$SELF_BIN" uninstall || true
+           else warn "缺少脚本副本,无法卸载"; fi
+           [ -d "$INSTALL_DIR" ] || exit 0 ;;
+        0|q|Q) echo "再见。"; exit 0 ;;
+        *) warn "无效选择,请输入 0-7" ;;
+      esac
+      press_enter "
+按回车返回菜单… "
+    done
+  fi
+
+  # 无终端(自动化/定时任务):保持原行为,只重启
   warn "检测到已完成的部署($INSTALL_DIR),只做重启,不改任何配置/密钥。"
   docker compose up -d
   RUNNING="$(docker compose ps --status running -q 2>/dev/null | wc -l | tr -d ' ' || true)"
@@ -280,6 +433,9 @@ fi
 REG_MODE="${REG_MODE:-closed}"
 ENABLE_CALLS="${ENABLE_CALLS:-1}"
 ENABLE_FEDERATION="${ENABLE_FEDERATION:-0}"
+# 严格归一为单字符 0/1(任何其他值一律视为关闭),防止异常值/换行注入进 .env
+case "$ENABLE_CALLS" in 1) : ;; *) ENABLE_CALLS=0 ;; esac
+case "$ENABLE_FEDERATION" in 1) : ;; *) ENABLE_FEDERATION=0 ;; esac
 case "$REG_MODE" in closed|token|open) : ;; *) die "REG_MODE 只能是 closed/token/open,收到: $REG_MODE" ;; esac
 
 # 由选项派生的清单(DNS 记录 / 端口 / 服务数)
@@ -494,6 +650,9 @@ fi
 # 6. 机密(已有 .env 则复用,防止重跑后密码错乱)与配置文件
 # ---------------------------------------------------------------------
 bold "5/9 生成密钥与配置"
+# 之后生成的所有文件默认权限 0600(仅 root 可读),密钥不再世界可读
+umask 077
+[ -f .env ] && cp -a .env ".env.bak-$(date +%F-%H%M%S)" 2>/dev/null || true  # 重写前留底,防用户自定义行丢失
 env_get() { grep -E "^$1=" .env 2>/dev/null | head -1 | cut -d= -f2- || true; }
 PG_PASS="$(env_get POSTGRES_PASSWORD)";   [ -n "$PG_PASS" ]   || PG_PASS="$(openssl rand -hex 24)"
 LK_KEY="$(env_get LIVEKIT_API_KEY)";      [ -n "$LK_KEY" ]    || LK_KEY="API$(openssl rand -hex 6)"
@@ -528,6 +687,7 @@ services:
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
     environment:
       POSTGRES_USER: synapse
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -546,6 +706,7 @@ services:
   synapse:
     image: matrixdotorg/synapse:latest
     restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -564,6 +725,7 @@ cat >> docker-compose.yml <<'EOF'
   lk-jwt-service:
     image: ghcr.io/element-hq/lk-jwt-service:latest
     restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
     environment:
       LIVEKIT_URL: "wss://livekit.${MATRIX_DOMAIN}"
       LIVEKIT_KEY: ${LIVEKIT_API_KEY}
@@ -581,6 +743,7 @@ cat >> docker-compose.yml <<'EOF'
   livekit:
     image: livekit/livekit-server:latest
     restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
     command: ["--config", "/etc/livekit.yaml"]
     volumes:
       - ./livekit/livekit.yaml:/etc/livekit.yaml:ro
@@ -597,6 +760,7 @@ cat >> docker-compose.yml <<'EOF'
   caddy:
     image: caddy:2
     restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
     depends_on: [synapse]
     ports:
       - "80:80"
@@ -645,6 +809,9 @@ $DOMAIN {
 }
 
 $M_HOST {
+	# 管理 API 不对公网开放(需要时经 SSH 隧道直连容器内 8008)
+	@admin path /_synapse/admin/* /_synapse/*/admin/*
+	respond @admin "Not found" 404
 	reverse_proxy synapse:8008
 }
 EOF
@@ -713,6 +880,9 @@ elif [ "$ENABLE_CALLS" = "1" ]; then
 else
   SYN_RESOURCES="client"
 fi
+
+# 重写前备份已有的 homeserver.yaml(保留用户可能的手动改动)
+[ -f data/synapse/homeserver.yaml ] && cp -a data/synapse/homeserver.yaml "data/synapse/homeserver.yaml.bak-$(date +%F-%H%M%S)" 2>/dev/null || true
 
 cat > data/synapse/homeserver.yaml <<EOF
 # ===== $MARKER($(date +%F))=====
@@ -793,6 +963,10 @@ EOF
 
 enable_registration: true
 enable_registration_without_verification: true
+# 开放注册的基础滥用防线:限制单 IP 注册速率
+rc_registration:
+  per_second: 0.05
+  burst_count: 3
 EOF
     ;;
   *)
@@ -813,6 +987,9 @@ EOF
 fi
 
 chown -R 991:991 data/synapse
+# homeserver.yaml / 签名密钥含明文密钥,强制 0600(不依赖 umask,防重跑时 umask 已变)
+chmod 600 data/synapse/homeserver.yaml 2>/dev/null || true
+chmod 600 data/synapse/*.signing.key 2>/dev/null || true
 
 # ---------------------------------------------------------------------
 # 8. 启动 + 证书验收
@@ -880,10 +1057,12 @@ if [ -f CREDENTIALS.txt ]; then
   ADMIN_INFO="   账号密码不变(见 $INSTALL_DIR/CREDENTIALS.txt)"
   echo "已有管理员账号,跳过创建。"
 elif [ "$READY" -eq 1 ]; then
-  if docker compose exec -T synapse register_new_matrix_user \
-       -c /data/homeserver.yaml -u "$ADMIN_USER" -p "$ADMIN_PASS" -a \
+  # 密码经 stdin 喂入(省略 -p),避免明文出现在进程列表 argv 里
+  if printf '%s\n%s\n' "$ADMIN_PASS" "$ADMIN_PASS" | docker compose exec -T synapse register_new_matrix_user \
+       -c /data/homeserver.yaml -u "$ADMIN_USER" -a \
        http://localhost:8008 >/dev/null 2>>install-error.log; then
     ADMIN_OK=1
+    rm -f install-error.log 2>/dev/null || true
   fi
 fi
 
