@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 # =====================================================================
-#  Matrix 全功能一键安装脚本(通用版 v1.4)
+#  Matrix 全功能一键安装脚本(通用版 v1.5)
+#
+#  v1.5 新增:①磁盘守卫+媒体清理(容器日志轮转 10MB×3、远端缓存媒体按 REMOTE_MEDIA_DAYS
+#    天自动清、菜单第 7 项/`cleanup` 子命令手动清理、每日 cron 磁盘偏高自动回收 Docker 冗余;
+#    本地文件默认永久保留,仅显式 LOCAL_MEDIA_DAYS 才按期删)。②消息留存/自动销毁(安装
+#    向导第 4 项,默认永久;选 N 天则超期消息自动清除)。③安装/报告文字加彩色高亮(标题、
+#    推荐、密码、后台地址、端口等),非终端/NO_COLOR 时自动关闭。
 #
 #  v1.4 修复(实机验证):管理后台进用户列表报 Failed to fetch / Load failed,
 #    浏览器控制台明确为 "blocked by CORS policy: No 'Access-Control-Allow-Origin'"。
@@ -56,9 +62,21 @@ set -euo pipefail
 INSTALL_DIR="${INSTALL_DIR:-/opt/matrix}"
 MARKER="由 matrix-installer.sh 生成"
 
-bold() { printf '\n\033[1;36m==> %s\033[0m\n' "$1"; }
-warn() { printf '\033[1;33m[!] %s\033[0m\n' "$1"; }
-die()  { printf '\033[1;31m[✗] %s\033[0m\n' "$1"; exit 1; }
+# ---- 终端配色(仅在真正的终端启用;输出被重定向到文件/日志、或设了 NO_COLOR 时自动关闭)----
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+  E=$'\033'
+  C_RESET="${E}[0m"; C_B="${E}[1m"; C_DIM="${E}[2m"; C_U="${E}[4m"
+  C_CYAN="${E}[1;36m"; C_GREEN="${E}[1;32m"; C_YELLOW="${E}[1;33m"
+  C_RED="${E}[1;31m";  C_BLUE="${E}[1;34m";  C_MAGENTA="${E}[1;35m"
+else
+  C_RESET=""; C_B=""; C_DIM=""; C_U=""
+  C_CYAN=""; C_GREEN=""; C_YELLOW=""; C_RED=""; C_BLUE=""; C_MAGENTA=""
+fi
+
+bold() { printf '\n%s==> %s%s\n' "$C_B$C_CYAN" "$1" "$C_RESET"; }
+warn() { printf '%s[!] %s%s\n' "$C_YELLOW" "$1" "$C_RESET"; }
+die()  { printf '%s[✗] %s%s\n' "$C_RED" "$1" "$C_RESET"; exit 1; }
+ok()   { printf '%s✓ %s%s\n' "$C_GREEN" "$1" "$C_RESET"; }
 
 # 交互辅助: 能真正打开 /dev/tty 才算有终端(curl|bash 时 stdin 是管道,
 # 但 SSH 会话的 /dev/tty 仍连着键盘;纯自动化/cron 则两者都没有)
@@ -80,11 +98,22 @@ menu_status() {
   echo "── 容器状态 ──"
   docker compose ps 2>/dev/null || true
   echo "── 资源占用 ──"
-  echo "  数据大小: $(du -sh data 2>/dev/null | cut -f1)    磁盘剩余: $(df -h . 2>/dev/null | awk 'NR==2{print $4}')"
+  local diskpct diskfree datasz mediasz
+  diskpct="$(df . 2>/dev/null | awk 'NR==2{gsub(/%/,"",$5); print $5}')"; diskpct="${diskpct:-0}"
+  diskfree="$(df -h . 2>/dev/null | awk 'NR==2{print $4}')"
+  datasz="$(du -sh data 2>/dev/null | cut -f1)"
+  mediasz="$(du -sh data/synapse/media_store 2>/dev/null | cut -f1)"
+  if [ "$diskpct" -ge 90 ] 2>/dev/null; then
+    printf '  数据: %s   媒体: %s   磁盘剩余: %s   %s磁盘已用 %s%%,偏高,建议菜单选 7 清理%s\n' \
+      "${datasz:-?}" "${mediasz:-0}" "${diskfree:-?}" "$C_RED" "$diskpct" "$C_RESET"
+  else
+    printf '  数据: %s   媒体: %s   磁盘剩余: %s   %s磁盘已用 %s%%%s\n' \
+      "${datasz:-?}" "${mediasz:-0}" "${diskfree:-?}" "$C_GREEN" "$diskpct" "$C_RESET"
+  fi
   free -h 2>/dev/null | awk 'NR<=2{print "  "$0}' || true
   echo "── 在线检查 ──"
   if curl -4 -fsS --max-time 8 "https://matrix.${d}/_matrix/client/versions" >/dev/null 2>&1; then
-    echo "  ✓ https://matrix.${d} 正常(证书有效,服务在线)"
+    ok "https://matrix.${d} 正常(证书有效,服务在线)"
   else
     warn "matrix.${d} 当前无法访问 —— 排查: docker compose logs --tail 30 caddy"
   fi
@@ -105,12 +134,58 @@ menu_backup() {
   chmod 600 "$f" 2>/dev/null || true
   rm -f "db-backup-$ts.sql.gz"
   if [ -s "$f" ]; then
-    echo "✓ 备份完成: $f($(du -h "$f" | cut -f1))"
+    ok "备份完成: $f($(du -h "$f" | cut -f1))"
     echo "  下载到自己电脑(在你电脑的终端执行):"
     echo "    scp root@服务器IP:$f ~/Desktop/"
   else
     warn "备份失败"
   fi
+}
+
+# ---- 磁盘守卫 / 媒体清理 ----
+# 安全清理:只回收 Docker 冗余镜像与构建缓存,永远不删你自己用户上传的文件。
+menu_cleanup() {
+  cd "$INSTALL_DIR"
+  local before after freed rdays
+  rdays="$(env_saved REMOTE_MEDIA_DAYS)"; rdays="${rdays:-14}"
+  echo ""
+  echo "── 磁盘 / 媒体 用量 ──"
+  printf '  安装目录合计: %s    磁盘剩余: %s\n' "$(du -sh . 2>/dev/null | cut -f1)" "$(df -h . 2>/dev/null | awk 'NR==2{print $4}')"
+  printf '  ├ 数据库:   %s\n' "$(du -sh data/postgres 2>/dev/null | cut -f1)"
+  printf '  └ 媒体文件: %s\n' "$(du -sh data/synapse/media_store 2>/dev/null | cut -f1)"
+  echo ""
+  echo "开始安全清理(仅回收 Docker 冗余镜像与构建缓存,不动你任何用户的文件)…"
+  before="$(df -P . 2>/dev/null | awk 'NR==2{print $4}')"
+  docker image prune -f   >/dev/null 2>&1 || true
+  docker builder prune -f >/dev/null 2>&1 || true
+  after="$(df -P . 2>/dev/null | awk 'NR==2{print $4}')"
+  if [ -n "$before" ] && [ -n "$after" ] && [ "$after" -gt "$before" ] 2>/dev/null; then
+    freed=$(( (after - before) / 1024 ))
+    ok "清理完成,释放约 ${freed} MB(磁盘剩余 $(df -h . 2>/dev/null | awk 'NR==2{print $4}'))。"
+  else
+    ok "清理完成(暂无可回收冗余,磁盘剩余 $(df -h . 2>/dev/null | awk 'NR==2{print $4}'))。"
+  fi
+  echo ""
+  echo "关于媒体:"
+  echo "  · 远端缓存媒体:Synapse 已按 ${rdays} 天自动清理,无需手动。"
+  echo "  · 本地文件(你自己用户上传的):默认【永久保留】,清理绝不碰它们。"
+  printf '    如确需按期删除本地旧文件(%s会永久删除,慎用%s),执行:\n' "$C_RED" "$C_RESET"
+  echo "      LOCAL_MEDIA_DAYS=180 sudo -E bash $INSTALL_DIR/matrix-installer.sh config"
+}
+
+# cron 每日调用:磁盘偏高(≥80%)时自动回收 Docker 冗余并记日志。永不删用户文件、无需交互。
+disk_guard() {
+  cd "$INSTALL_DIR" 2>/dev/null || return 0
+  local pct log; log="$INSTALL_DIR/diskguard.log"
+  pct="$(df . 2>/dev/null | awk 'NR==2{gsub(/%/,"",$5); print $5}')"; pct="${pct:-0}"
+  [ "$pct" -ge 80 ] 2>/dev/null || return 0
+  {
+    echo "[$(date '+%F %T')] 磁盘已用 ${pct}% ≥ 80%,自动回收 Docker 冗余…"
+    docker image prune -f   2>&1 | tail -n1
+    docker builder prune -f 2>&1 | tail -n1
+    df -h . | awk 'NR==2{print "  回收后:剩余 "$4",已用 "$5}'
+  } >> "$log" 2>&1
+  tail -n 200 "$log" > "$log.tmp" 2>/dev/null && mv -f "$log.tmp" "$log" 2>/dev/null || true
 }
 
 # 非 root 时自动提权(有脚本文件用 sudo 重跑;curl|bash 无文件则提示)
@@ -126,6 +201,23 @@ command -v apt-get >/dev/null 2>&1 \
 SELF_SRC=""
 if [ -f "${0:-}" ]; then
   SELF_SRC="$(cd "$(dirname -- "$0")" && pwd)/$(basename -- "$0")"
+fi
+
+# ---------------------------------------------------------------------
+# 子命令: diskguard —— 磁盘守卫(cron 每日调用,免交互;磁盘偏高才清 Docker 冗余)
+# ---------------------------------------------------------------------
+if [ "${1:-}" = "diskguard" ]; then
+  disk_guard
+  exit 0
+fi
+
+# ---------------------------------------------------------------------
+# 子命令: cleanup —— 手动清理磁盘 / 查看媒体用量(安全,不删用户文件)
+# ---------------------------------------------------------------------
+if [ "${1:-}" = "cleanup" ]; then
+  [ -d "$INSTALL_DIR" ] || die "找不到 $INSTALL_DIR,先完成部署"
+  menu_cleanup
+  exit 0
 fi
 
 # ---------------------------------------------------------------------
@@ -227,16 +319,17 @@ if [ "$RECONFIG" -eq 0 ] && [ -f "$INSTALL_DIR/CREDENTIALS.txt" ] \
 └──────────────────────────────────────────────┘
   1) 查看运行状态
   2) 添加团队成员
-  3) 修改配置(注册 / 通话 / 联邦)
+  3) 修改配置(注册 / 通话 / 联邦 / 留存)
   4) 立即备份(数据库 + 密钥 + 配置)
   5) 升级到最新版本
   6) 重启所有服务
-  7) 彻底卸载
+  7) 清理磁盘 / 媒体
+  8) 彻底卸载
   0) 退出
 EOF
       MCHOICE=""
-      if [ -t 0 ]; then read -rp "请选择 [0-7]: " MCHOICE || exit 0
-      else read -rp "请选择 [0-7]: " MCHOICE < /dev/tty 2>/dev/null || exit 0; fi
+      if [ -t 0 ]; then read -rp "请选择 [0-8]: " MCHOICE || exit 0
+      else read -rp "请选择 [0-8]: " MCHOICE < /dev/tty 2>/dev/null || exit 0; fi
       case "$MCHOICE" in
         1) menu_status ;;
         2) if [ -f "$SELF_BIN" ]; then bash "$SELF_BIN" adduser || true
@@ -245,15 +338,16 @@ EOF
            else warn "缺少脚本副本,无法进入改配置"; fi ;;
         4) menu_backup ;;
         5) echo "==> 拉取最新镜像并升级…"
-           { docker compose pull -q && docker compose up -d --remove-orphans && echo "✓ 升级完成"; } \
+           { docker compose pull -q && docker compose up -d --remove-orphans && ok "升级完成"; } \
              || warn "升级失败,查看: docker compose logs --tail 30" ;;
         6) { docker compose up -d && docker compose restart; } >/dev/null 2>&1 \
-             && echo "✓ 已重启全部服务" || warn "重启失败,查看: docker compose ps" ;;
-        7) if [ -f "$SELF_BIN" ]; then INSTALL_DIR="$INSTALL_DIR" bash "$SELF_BIN" uninstall || true
+             && ok "已重启全部服务" || warn "重启失败,查看: docker compose ps" ;;
+        7) menu_cleanup ;;
+        8) if [ -f "$SELF_BIN" ]; then INSTALL_DIR="$INSTALL_DIR" bash "$SELF_BIN" uninstall || true
            else warn "缺少脚本副本,无法卸载"; fi
            [ -d "$INSTALL_DIR" ] || exit 0 ;;
         0|q|Q) echo "再见。"; exit 0 ;;
-        *) warn "无效选择,请输入 0-7" ;;
+        *) warn "无效选择,请输入 0-8" ;;
       esac
       press_enter "
 按回车返回菜单… "
@@ -339,38 +433,42 @@ ask_opt() {  # $1=提示 $2=默认值 → 结果放入 REPLY
 
 # 记录哪些选项是用户用环境变量显式指定的(config 模式免交互的依据)
 EXPLICIT_OPTS=0
-[ -n "${REG_MODE:-}${ENABLE_CALLS:-}${ENABLE_FEDERATION:-}" ] && EXPLICIT_OPTS=1
+[ -n "${REG_MODE:-}${ENABLE_CALLS:-}${ENABLE_FEDERATION:-}${MSG_RETENTION_DAYS:-}${LOCAL_MEDIA_DAYS:-}" ] && EXPLICIT_OPTS=1
 
 REG_MODE="${REG_MODE:-$(env_saved REG_MODE)}"
 ENABLE_CALLS="${ENABLE_CALLS:-$(env_saved ENABLE_CALLS)}"
 ENABLE_FEDERATION="${ENABLE_FEDERATION:-$(env_saved ENABLE_FEDERATION)}"
+MSG_RETENTION_DAYS="${MSG_RETENTION_DAYS:-$(env_saved MSG_RETENTION_DAYS)}"
+# 媒体保留天数(磁盘守卫):远端缓存默认 14 天自动清;本地文件默认空=永久保留
+REMOTE_MEDIA_DAYS="${REMOTE_MEDIA_DAYS:-$(env_saved REMOTE_MEDIA_DAYS)}"; REMOTE_MEDIA_DAYS="${REMOTE_MEDIA_DAYS:-14}"
+LOCAL_MEDIA_DAYS="${LOCAL_MEDIA_DAYS:-$(env_saved LOCAL_MEDIA_DAYS)}"
 
 # 各选项的"回车默认值"(全新安装=推荐值;config 模式=当前值)
-DEF_REG="1"; DEF_CALLS="Y"; DEF_FED="N"
+DEF_REG="1"; DEF_CALLS="Y"; DEF_FED="N"; DEF_RET="0"
 if [ "$RECONFIG" -eq 1 ] && [ "$EXPLICIT_OPTS" -eq 0 ]; then
   has_tty || die "config 需要交互终端;或用环境变量静默修改,如: ENABLE_CALLS=0 sudo -E bash matrix-installer.sh config"
   case "$REG_MODE" in token) DEF_REG=2 ;; open) DEF_REG=3 ;; *) DEF_REG=1 ;; esac
   [ "$ENABLE_CALLS" = "0" ] && DEF_CALLS="n" || DEF_CALLS="Y"
   [ "$ENABLE_FEDERATION" = "1" ] && DEF_FED="y" || DEF_FED="N"
+  case "$MSG_RETENTION_DAYS" in ''|0) DEF_RET="0" ;; *) DEF_RET="$MSG_RETENTION_DAYS" ;; esac
   echo ""
-  echo "当前配置: 注册[$REG_MODE] · 通话[$([ "$ENABLE_CALLS" = "1" ] && echo 开启 || echo 关闭)] · 联邦[$([ "$ENABLE_FEDERATION" = "1" ] && echo 开启 || echo 关闭)]"
+  echo "当前配置: 注册[$REG_MODE] · 通话[$([ "$ENABLE_CALLS" = "1" ] && echo 开启 || echo 关闭)] · 联邦[$([ "$ENABLE_FEDERATION" = "1" ] && echo 开启 || echo 关闭)] · 留存[$({ [ -n "$MSG_RETENTION_DAYS" ] && [ "$MSG_RETENTION_DAYS" != 0 ]; } && echo "${MSG_RETENTION_DAYS}天" || echo 永久)]"
   echo "下面重新选择,直接回车 = 保持当前值。"
-  REG_MODE=""; ENABLE_CALLS=""; ENABLE_FEDERATION=""
+  REG_MODE=""; ENABLE_CALLS=""; ENABLE_FEDERATION=""; MSG_RETENTION_DAYS=""
 fi
 
-if has_tty && { [ -z "$REG_MODE" ] || [ -z "$ENABLE_CALLS" ] || [ -z "$ENABLE_FEDERATION" ]; }; then
-  cat <<'EOF'
+if has_tty && { [ -z "$REG_MODE" ] || [ -z "$ENABLE_CALLS" ] || [ -z "$ENABLE_FEDERATION" ] || [ -z "$MSG_RETENTION_DAYS" ]; }; then
+  cat <<EOF
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- 安装选项:共 3 个,每个都有大白话说明。
+${C_B}${C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ 安装选项:共 4 个,每个都有大白话说明。
  看不懂或拿不准 → 直接按回车,用推荐值(已是商业保密最安全组合)。
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RESET}
 EOF
 
   if [ -z "$REG_MODE" ]; then
+    printf '\n%s【选项 1/4】注册方式%s —— 决定"谁有资格在你的服务器上开账号"\n' "$C_B$C_CYAN" "$C_RESET"
     cat <<'EOF'
-
-【选项 1/3】注册方式 —— 决定"谁有资格在你的服务器上开账号"
 
   [1] 关闭注册(推荐)
       作用: 服务器不存在"注册"入口,账号只能由管理员亲手创建。
@@ -397,9 +495,8 @@ EOF
   fi
 
   if [ -z "$ENABLE_CALLS" ]; then
+    printf '\n%s【选项 2/4】语音/视频通话%s —— 要不要安装"打电话/开会"的组件\n' "$C_B$C_CYAN" "$C_RESET"
     cat <<'EOF'
-
-【选项 2/3】语音/视频通话 —— 要不要安装"打电话/开会"的组件
 
   [Y] 开启(推荐)
       作用: 支持一对一通话和多人视频会议,画面声音端到端加密,
@@ -417,9 +514,8 @@ EOF
   fi
 
   if [ -z "$ENABLE_FEDERATION" ]; then
+    printf '\n%s【选项 3/4】联邦互通%s —— 你的服务器要不要与"外部 Matrix 世界"相连\n' "$C_B$C_CYAN" "$C_RESET"
     cat <<'EOF'
-
-【选项 3/3】联邦互通 —— 你的服务器要不要与"外部 Matrix 世界"相连
 
   说明: Matrix 是个像"邮箱"一样的开放网络,全世界有成千上万台
         Matrix 服务器(如 matrix.org)。"联邦"就是与它们互联互通。
@@ -439,6 +535,25 @@ EOF
     ask_opt "→ 你的选择 [y/N,直接回车=$DEF_FED]: " "$DEF_FED"
     case "$REPLY" in y|Y) ENABLE_FEDERATION=1 ;; *) ENABLE_FEDERATION=0 ;; esac
   fi
+
+  if [ -z "$MSG_RETENTION_DAYS" ]; then
+    printf '\n%s【选项 4/4】消息留存 / 自动销毁%s —— 服务器上的聊天记录保留多久\n' "$C_B$C_CYAN" "$C_RESET"
+    cat <<'EOF'
+
+  [0] 永久保留(推荐,回车即选)
+      作用: 所有聊天记录一直留在服务器,永不自动删除。
+      好处: 律师/商务留档、事后追溯、合规取证都靠它。
+      风险: 无。代价是长期占磁盘(可随时到管理菜单第 7 项清理冗余)。
+
+  [输天数] 只留 N 天,超期自动销毁
+      作用: 超过 N 天的消息由服务器定期自动清除(阅后即焚式)。
+      好处: 数据最小化 —— 泄露或被查时,可暴露的历史更少。
+      风险: 到期消息不可恢复!(已同步到成员手机的旧消息,本地可能仍在)
+            例:输 90 = 只留 90 天;输 30 = 只留一个月。
+EOF
+    ask_opt "→ 你的选择 [0=永久,或直接输天数,回车=$DEF_RET]: " "$DEF_RET"
+    MSG_RETENTION_DAYS="$REPLY"
+  fi
 fi
 REG_MODE="${REG_MODE:-closed}"
 ENABLE_CALLS="${ENABLE_CALLS:-1}"
@@ -447,6 +562,11 @@ ENABLE_FEDERATION="${ENABLE_FEDERATION:-0}"
 case "$ENABLE_CALLS" in 1) : ;; *) ENABLE_CALLS=0 ;; esac
 case "$ENABLE_FEDERATION" in 1) : ;; *) ENABLE_FEDERATION=0 ;; esac
 case "$REG_MODE" in closed|token|open) : ;; *) die "REG_MODE 只能是 closed/token/open,收到: $REG_MODE" ;; esac
+# 留存/媒体天数:只接受非负整数;非法或空一律回落安全默认(留存 0=永久;本地媒体空=永久)
+MSG_RETENTION_DAYS="${MSG_RETENTION_DAYS:-0}"
+case "$MSG_RETENTION_DAYS" in ''|*[!0-9]*) MSG_RETENTION_DAYS=0 ;; esac
+case "$REMOTE_MEDIA_DAYS" in ''|*[!0-9]*) REMOTE_MEDIA_DAYS=14 ;; esac
+case "${LOCAL_MEDIA_DAYS:-}" in *[!0-9]*) LOCAL_MEDIA_DAYS="" ;; esac
 
 # 由选项派生的清单(DNS 记录 / 端口 / 服务数)
 if [ "$ENABLE_CALLS" = "1" ]; then
@@ -467,7 +587,12 @@ else
   SVC_COUNT=3
 fi
 echo ""
-echo "  ✔ 配置: 注册[$REG_MODE] · 通话[$([ "$ENABLE_CALLS" = "1" ] && echo 开启 || echo 关闭)] · 联邦[$([ "$ENABLE_FEDERATION" = "1" ] && echo 开启 || echo 关闭)]"
+printf '  %s✔ 配置: 注册[%s] · 通话[%s] · 联邦[%s] · 留存[%s]%s\n' "$C_GREEN" \
+  "$REG_MODE" \
+  "$([ "$ENABLE_CALLS" = "1" ] && echo 开启 || echo 关闭)" \
+  "$([ "$ENABLE_FEDERATION" = "1" ] && echo 开启 || echo 关闭)" \
+  "$([ "$MSG_RETENTION_DAYS" != 0 ] && echo "${MSG_RETENTION_DAYS}天自动销毁" || echo 永久)" \
+  "$C_RESET"
 
 # ---------------------------------------------------------------------
 # 向导: 开工前把必须手动做的两件事讲清楚
@@ -475,20 +600,20 @@ echo "  ✔ 配置: 注册[$REG_MODE] · 通话[$([ "$ENABLE_CALLS" = "1" ] && e
 if has_tty && [ "$RECONFIG" -eq 0 ]; then
   cat <<EOF
 
-┌──────────────────────────────────────────────────────────┐
+${C_CYAN}┌──────────────────────────────────────────────────────────┐
 │  Matrix 一键安装向导 · 为商业保密而生                    │
 │  聊天/文件/会议全部只存在你自己的服务器,外人无法触达    │
-└──────────────────────────────────────────────────────────┘
+└──────────────────────────────────────────────────────────┘${C_RESET}
 接下来全自动完成(约 5-10 分钟):装 Docker → 启动服务 →
 自动申请 HTTPS 证书 → 生成全部密码 → 创建管理员 → 给你登录信息。
 
 只有两件事必须你在【网页后台】手动做(脚本替代不了):
 
- ① 域名商后台 → 添加下列 A 记录,全部指向 ${PUBLIC_IP:-本服务器IP}:
-$DNS_LINES
+ ${C_B}${C_YELLOW}① 域名商后台 → 添加下列 A 记录,全部指向 ${PUBLIC_IP:-本服务器IP}:${C_RESET}
+${C_GREEN}$DNS_LINES${C_RESET}
 
- ② 服务器商控制台 → 安全组/防火墙 放行这些端口:
-      $PORT_LINE
+ ${C_B}${C_YELLOW}② 服务器商控制台 → 安全组/防火墙 放行这些端口:${C_RESET}
+      ${C_GREEN}$PORT_LINE${C_RESET}
     (后台里找不到"安全组"设置的服务商,跳过这条即可)
 
 EOF
@@ -628,6 +753,12 @@ elif [ ! -f "$SELF_DST" ] && [ -n "${MATRIX_INSTALLER_URL:-}" ]; then
 fi
 [ -f "$SELF_DST" ] && HAVE_LOCAL_SCRIPT=1 || HAVE_LOCAL_SCRIPT=0
 
+# 磁盘守卫定时任务:每天 04:30 检查磁盘,偏高(≥80%)才自动回收 Docker 冗余(见 diskguard 子命令)
+if [ "$HAVE_LOCAL_SCRIPT" = "1" ] && [ -d /etc/cron.d ]; then
+  printf '30 4 * * * root INSTALL_DIR=%s bash %s diskguard >/dev/null 2>&1\n' "$INSTALL_DIR" "$SELF_DST" \
+    > /etc/cron.d/matrix-diskguard 2>/dev/null && chmod 644 /etc/cron.d/matrix-diskguard 2>/dev/null || true
+fi
+
 OUR_CFG=0
 if [ -f data/synapse/homeserver.yaml ] && grep -q "$MARKER" data/synapse/homeserver.yaml 2>/dev/null; then
   OUR_CFG=1
@@ -693,6 +824,9 @@ PANEL_PASS=$PANEL_PASS
 REG_MODE=$REG_MODE
 ENABLE_CALLS=$ENABLE_CALLS
 ENABLE_FEDERATION=$ENABLE_FEDERATION
+MSG_RETENTION_DAYS=$MSG_RETENTION_DAYS
+REMOTE_MEDIA_DAYS=$REMOTE_MEDIA_DAYS
+LOCAL_MEDIA_DAYS=$LOCAL_MEDIA_DAYS
 SYNAPSE_MEM=$SYNAPSE_MEM
 POSTGRES_MEM=$POSTGRES_MEM
 LIVEKIT_MEM=$LIVEKIT_MEM
@@ -703,10 +837,18 @@ chmod 600 .env
 cat > docker-compose.yml <<'EOF'
 name: matrix
 
+# 日志轮转:限制每个容器 json 日志最多 10MB×3 份,防止日志默默撑爆磁盘(磁盘守卫)
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
+    logging: *default-logging
     security_opt: ["no-new-privileges:true"]
     environment:
       POSTGRES_USER: synapse
@@ -726,6 +868,7 @@ services:
   synapse:
     image: matrixdotorg/synapse:latest
     restart: unless-stopped
+    logging: *default-logging
     security_opt: ["no-new-privileges:true"]
     depends_on:
       postgres:
@@ -745,6 +888,7 @@ cat >> docker-compose.yml <<'EOF'
   lk-jwt-service:
     image: ghcr.io/element-hq/lk-jwt-service:latest
     restart: unless-stopped
+    logging: *default-logging
     security_opt: ["no-new-privileges:true"]
     environment:
       LIVEKIT_URL: "wss://livekit.${MATRIX_DOMAIN}"
@@ -763,6 +907,7 @@ cat >> docker-compose.yml <<'EOF'
   livekit:
     image: livekit/livekit-server:latest
     restart: unless-stopped
+    logging: *default-logging
     security_opt: ["no-new-privileges:true"]
     command: ["--config", "/etc/livekit.yaml"]
     volumes:
@@ -780,6 +925,7 @@ cat >> docker-compose.yml <<'EOF'
   caddy:
     image: caddy:2
     restart: unless-stopped
+    logging: *default-logging
     security_opt: ["no-new-privileges:true"]
     depends_on: [synapse]
     ports:
@@ -801,6 +947,7 @@ cat >> docker-compose.yml <<'EOF'
   ketesa:
     image: ghcr.io/etkecc/ketesa:latest
     restart: unless-stopped
+    logging: *default-logging
     security_opt: ["no-new-privileges:true"]
     volumes:
       - ./data/ketesa/config.json:/var/public/config.json:ro
@@ -1102,6 +1249,37 @@ federation_domain_whitelist: []
 EOF
 fi
 
+# ---- 媒体保留(磁盘守卫)----
+# 远端缓存媒体:超期由 Synapse 自动清理(安全)。本地文件:默认不写=永久保留,
+# 只有显式设了 LOCAL_MEDIA_DAYS 才按期删除你自己用户上传的旧文件(慎用)。
+cat >> data/synapse/homeserver.yaml <<EOF
+
+media_retention:
+  remote_media_lifetime: ${REMOTE_MEDIA_DAYS}d
+EOF
+if [ -n "${LOCAL_MEDIA_DAYS:-}" ]; then
+cat >> data/synapse/homeserver.yaml <<EOF
+  local_media_lifetime: ${LOCAL_MEDIA_DAYS}d
+EOF
+fi
+
+# ---- 消息留存 / 自动销毁(0=永久保留,不写此段)----
+if [ "$MSG_RETENTION_DAYS" != "0" ]; then
+cat >> data/synapse/homeserver.yaml <<EOF
+
+# 超过 max_lifetime 的消息由后台任务每天清除一次
+retention:
+  enabled: true
+  default_policy:
+    min_lifetime: 1d
+    max_lifetime: ${MSG_RETENTION_DAYS}d
+  allowed_lifetime_min: 1d
+  allowed_lifetime_max: ${MSG_RETENTION_DAYS}d
+  purge_jobs:
+    - interval: 1d
+EOF
+fi
+
 chown -R 991:991 data/synapse
 # homeserver.yaml / 签名密钥含明文密钥,强制 0600(不依赖 umask,防重跑时 umask 已变)
 chmod 600 data/synapse/homeserver.yaml 2>/dev/null || true
@@ -1165,8 +1343,8 @@ bold "9/9 管理员账号"
 ADMIN_USER="admin"
 ADMIN_PASS="$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | cut -c1-16)"
 ADMIN_OK=0
-ADMIN_INFO="   账号:    $ADMIN_USER
-   密码:    $ADMIN_PASS"
+ADMIN_INFO="   账号:    ${C_B}$ADMIN_USER${C_RESET}
+   密码:    ${C_B}${C_GREEN}$ADMIN_PASS${C_RESET}"
 if [ -f CREDENTIALS.txt ]; then
   # 已有管理员(config/续跑场景):不动账号,不覆盖凭据
   ADMIN_OK=1
@@ -1213,9 +1391,9 @@ CALL_CHECK_LINE=""
 PANEL_BLOCK=""
 if [ "$PANEL_ENABLED" = "1" ]; then
   PANEL_BLOCK=" 网页管理后台(admin.etke.cc 同款,自托管在你服务器上):
-   打开 https://$ADMIN_HOST
-   ① 浏览器先弹密码框 → 输 admin / $PANEL_PASS
-   ② 再用管理员 admin / $ADMIN_PASS 登录 → 管理用户/房间/媒体/注册令牌
+   打开 ${C_BLUE}https://$ADMIN_HOST${C_RESET}
+   ① 浏览器先弹密码框 → 输 admin / ${C_B}${C_GREEN}$PANEL_PASS${C_RESET}
+   ② 再用管理员 admin / ${C_B}${C_GREEN}$ADMIN_PASS${C_RESET} 登录 → 管理用户/房间/媒体/注册令牌
    ⚠️ 需给 $ADMIN_HOST 加一条 DNS A 记录指向本服务器(没加则后台暂时打不开,加好后 Caddy 自动签证书)
 "
 fi
@@ -1237,18 +1415,18 @@ if [ "$RECONFIG" -eq 1 ]; then DONE_TITLE="🎉 配置修改完成!"; fi
 if [ "$ADMIN_OK" -eq 1 ] && [ "$CERT_OK" -eq 1 ]; then
   cat <<EOF
 
-========================================================
- $DONE_TITLE  $DOMAIN
- (配置: 注册[$REG_MODE] · 通话[$([ "$ENABLE_CALLS" = "1" ] && echo 开 || echo 关)] · 联邦[$([ "$ENABLE_FEDERATION" = "1" ] && echo 开 || echo 关)])
+${C_GREEN}========================================================${C_RESET}
+ ${C_B}${C_GREEN}$DONE_TITLE${C_RESET}  ${C_B}$DOMAIN${C_RESET}
+ (配置: 注册[$REG_MODE] · 通话[$([ "$ENABLE_CALLS" = "1" ] && echo 开 || echo 关)] · 联邦[$([ "$ENABLE_FEDERATION" = "1" ] && echo 开 || echo 关)] · 留存[$([ "$MSG_RETENTION_DAYS" != 0 ] && echo "${MSG_RETENTION_DAYS}天自动销毁" || echo 永久)])
 
  手机装 Element X,登录:
-   服务器:  $DOMAIN
+   服务器:  ${C_B}$DOMAIN${C_RESET}
 $ADMIN_INFO
  (凭据存于 $INSTALL_DIR/CREDENTIALS.txt)
 
 $PANEL_BLOCK
  添加团队成员:
-   后台(推荐,零终端): $PANEL_URL → Users → 新建
+   后台(推荐,零终端): ${C_BLUE}$PANEL_URL${C_RESET} → Users → 新建
    或命令行: $ADDUSER_HINT
 $TOKEN_HINT
  自检:
@@ -1257,8 +1435,8 @@ $CALL_CHECK_LINE
    cd $INSTALL_DIR && docker compose ps    # $SVC_COUNT 个容器都应 running
    浏览器: https://federationtester.matrix.org/#$DOMAIN
 
- ⚠️ 云安全组记得放行: $PORT_LINE
-========================================================
+ ${C_YELLOW}⚠️ 云安全组记得放行: $PORT_LINE${C_RESET}
+${C_GREEN}========================================================${C_RESET}
 EOF
 else
   cat <<EOF
