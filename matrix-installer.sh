@@ -302,6 +302,7 @@ done
 
 ACME_EMAIL="${ACME_EMAIL:-admin@$DOMAIN}"
 M_HOST="matrix.$DOMAIN"
+ADMIN_HOST="admin.$DOMAIN"     # 自托管管理后台(Ketesa=admin.etke.cc 同款)
 LK_HOST="livekit.$DOMAIN"
 RTC_HOST="matrix-rtc.$DOMAIN"
 
@@ -443,6 +444,7 @@ if [ "$ENABLE_CALLS" = "1" ]; then
   REQUIRED_HOSTS="$DOMAIN $M_HOST $LK_HOST $RTC_HOST"
   DNS_LINES="      $DOMAIN
       $M_HOST
+      $ADMIN_HOST   (管理后台;不加也能装,但后台要它)
       $LK_HOST
       $RTC_HOST"
   PORT_LINE="80/tcp   443/tcp   443/udp   7881/tcp   7882/udp"
@@ -450,7 +452,8 @@ if [ "$ENABLE_CALLS" = "1" ]; then
 else
   REQUIRED_HOSTS="$DOMAIN $M_HOST"
   DNS_LINES="      $DOMAIN
-      $M_HOST"
+      $M_HOST
+      $ADMIN_HOST   (管理后台;不加也能装,但后台要它)"
   PORT_LINE="80/tcp   443/tcp   443/udp"
   SVC_COUNT=3
 fi
@@ -661,6 +664,13 @@ REG_SECRET="$(env_get REG_SECRET)";       [ -n "$REG_SECRET" ] || REG_SECRET="$(
 MACAROON="$(env_get MACAROON)";           [ -n "$MACAROON" ]   || MACAROON="$(openssl rand -hex 32)"
 FORM_SECRET="$(env_get FORM_SECRET)";     [ -n "$FORM_SECRET" ] || FORM_SECRET="$(openssl rand -hex 32)"
 
+# 管理后台网页门禁密码(Basic Auth 第一道锁);密码稳定持久,重跑不变
+PANEL_PASS="$(env_get PANEL_PASS)";       [ -n "$PANEL_PASS" ] || PANEL_PASS="$(openssl rand -base64 15 | tr -dc 'A-Za-z0-9' | cut -c1-14)"
+# 用 caddy 自带工具算 bcrypt 哈希;失败(如镜像拉不动)则不启用面板,绝不写坏 Caddyfile
+PANEL_HASH="$(docker run --rm caddy:2 caddy hash-password --plaintext "$PANEL_PASS" 2>/dev/null || true)"
+PANEL_ENABLED=0; case "$PANEL_HASH" in \$2*) PANEL_ENABLED=1 ;; *) PANEL_HASH="" ;; esac
+[ "$PANEL_ENABLED" = "1" ] && SVC_COUNT=$((SVC_COUNT + 1))
+
 cat > .env <<EOF
 # ===== Matrix 一键部署机密文件(勿泄露,勿删除) $(date +%F) =====
 MATRIX_DOMAIN=$DOMAIN
@@ -670,6 +680,7 @@ LIVEKIT_API_SECRET=$LK_SECRET
 REG_SECRET=$REG_SECRET
 MACAROON=$MACAROON
 FORM_SECRET=$FORM_SECRET
+PANEL_PASS=$PANEL_PASS
 REG_MODE=$REG_MODE
 ENABLE_CALLS=$ENABLE_CALLS
 ENABLE_FEDERATION=$ENABLE_FEDERATION
@@ -772,6 +783,24 @@ cat >> docker-compose.yml <<'EOF'
       - ./data/caddy/config:/config
     mem_limit: 128m
     networks: [internal]
+EOF
+
+# 管理后台容器(Ketesa,admin.etke.cc 同款,自托管)。仅静态站,极省内存。
+if [ "$PANEL_ENABLED" = "1" ]; then
+cat >> docker-compose.yml <<'EOF'
+
+  ketesa:
+    image: ghcr.io/etkecc/ketesa:latest
+    restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
+    volumes:
+      - ./data/ketesa/config.json:/app/config.json:ro
+    mem_limit: 64m
+    networks: [internal]
+EOF
+fi
+
+cat >> docker-compose.yml <<'EOF'
 
 networks:
   internal:
@@ -784,6 +813,16 @@ if [ "$ENABLE_CALLS" = "1" ]; then
   CLIENT_WK="{\"m.homeserver\":{\"base_url\":\"https://$M_HOST\"},\"org.matrix.msc4143.rtc_foci\":[{\"type\":\"livekit\",\"livekit_service_url\":\"https://$RTC_HOST\"}]}"
 else
   CLIENT_WK="{\"m.homeserver\":{\"base_url\":\"https://$M_HOST\"}}"
+fi
+
+# Ketesa 面板配置:把 homeserver 锁定成面板自己的域名(同源),用户登录连地址都不用填
+if [ "$PANEL_ENABLED" = "1" ]; then
+  mkdir -p data/ketesa
+  cat > data/ketesa/config.json <<EOF
+{
+  "restrictBaseUrl": "https://$ADMIN_HOST"
+}
+EOF
 fi
 
 cat > Caddyfile <<EOF
@@ -827,6 +866,25 @@ $RTC_HOST {
 	reverse_proxy lk-jwt-service:8080
 }
 EOF
+fi
+
+# 管理后台域:Basic Auth 网页门禁(第一道锁),同源反代 /_matrix 与 /_synapse 到 synapse。
+# 关键:门禁盖整个 host,浏览器过了门禁后对同源的 admin API 请求会自动带上凭据,
+# 所以面板能用、扫描器/爆破者连登录页都摸不到。__PANEL_HASH__ 占位随后 sed 替换成 bcrypt 哈希
+# (哈希含 $,不能直接进 heredoc,故用占位符)。主域名 $M_HOST 那道 admin API 404 封锁原封不动。
+if [ "$PANEL_ENABLED" = "1" ]; then
+cat >> Caddyfile <<EOF
+
+$ADMIN_HOST {
+	basic_auth {
+		admin __PANEL_HASH__
+	}
+	@api path /_matrix/* /_synapse/*
+	reverse_proxy @api synapse:8008
+	reverse_proxy ketesa:8080
+}
+EOF
+  sed -i "s|__PANEL_HASH__|$PANEL_HASH|" Caddyfile
 fi
 
 # ---- livekit.yaml(仅开通话时生成;webhook 走容器内网,不绕公网) ----
@@ -1073,6 +1131,7 @@ if [ "$ADMIN_OK" -eq 1 ] && [ ! -f CREDENTIALS.txt ]; then
 管理员账号:    $ADMIN_USER   (完整ID: @$ADMIN_USER:$DOMAIN)
 管理员密码:    $ADMIN_PASS
 客户端登录:    Element X 里服务器填 $DOMAIN
+$([ "$PANEL_ENABLED" = "1" ] && printf '管理后台:      https://%s\n网页门禁密码:  admin / %s   (打开后浏览器先弹的密码框)\n后台登录:      再用管理员 admin / %s 登录' "$ADMIN_HOST" "$PANEL_PASS" "$ADMIN_PASS")
 数据库密码 / LiveKit 密钥: 见同目录 .env
 ★ 必须备份: data/synapse/$DOMAIN.signing.key + homeserver.yaml + .env + 数据库 + media_store
 EOF
@@ -1092,10 +1151,24 @@ fi
 CALL_CHECK_LINE=""
 [ "$ENABLE_CALLS" = "1" ] && CALL_CHECK_LINE="   curl -s https://$RTC_HOST/healthz -o /dev/null -w '%{http_code}\\n'   # 通话授权,应输出 200"
 
+# 管理后台展示块:自托管 Ketesa(admin.etke.cc 同款),零终端管理
+PANEL_BLOCK=""
+if [ "$PANEL_ENABLED" = "1" ]; then
+  PANEL_BLOCK=" 网页管理后台(admin.etke.cc 同款,自托管在你服务器上):
+   打开 https://$ADMIN_HOST
+   ① 浏览器先弹密码框 → 输 admin / $PANEL_PASS
+   ② 再用管理员 admin / $ADMIN_PASS 登录 → 管理用户/房间/媒体/注册令牌
+   ⚠️ 需给 $ADMIN_HOST 加一条 DNS A 记录指向本服务器(没加则后台暂时打不开,加好后 Caddy 自动签证书)
+"
+fi
+
+# 管理后台的面板地址(有自托管面板就用它,否则回退到本地命令行提示)
+PANEL_URL="$([ "$PANEL_ENABLED" = "1" ] && echo "https://$ADMIN_HOST" || echo "(命令行 adduser)")"
+
 TOKEN_HINT=""
 if [ "$REG_MODE" = "token" ]; then
   TOKEN_HINT=" 生成注册邀请码(成员自助注册用):
-   打开 https://admin.etke.cc 用 admin 登录 → Registration tokens → 创建
+   打开 $PANEL_URL 用 admin 登录 → Registration tokens → 创建
    成员注册时填邀请码即可(可用浏览器打开 https://app.element.io 注册)
 "
 fi
@@ -1115,9 +1188,10 @@ if [ "$ADMIN_OK" -eq 1 ] && [ "$CERT_OK" -eq 1 ]; then
 $ADMIN_INFO
  (凭据存于 $INSTALL_DIR/CREDENTIALS.txt)
 
+$PANEL_BLOCK
  添加团队成员:
-   $ADDUSER_HINT
- (或网页后台 https://admin.etke.cc,Homeserver 填 https://$M_HOST)
+   后台(推荐,零终端): $PANEL_URL → Users → 新建
+   或命令行: $ADDUSER_HINT
 $TOKEN_HINT
  自检:
    curl -s https://$DOMAIN/.well-known/matrix/client
