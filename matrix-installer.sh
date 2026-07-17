@@ -794,7 +794,7 @@ cat >> docker-compose.yml <<'EOF'
     restart: unless-stopped
     security_opt: ["no-new-privileges:true"]
     volumes:
-      - ./data/ketesa/config.json:/app/config.json:ro
+      - ./data/ketesa/config.json:/var/public/config.json:ro
     mem_limit: 64m
     networks: [internal]
 EOF
@@ -868,20 +868,27 @@ $RTC_HOST {
 EOF
 fi
 
-# 管理后台域:Basic Auth 网页门禁(第一道锁),同源反代 /_matrix 与 /_synapse 到 synapse。
-# 关键:门禁盖整个 host,浏览器过了门禁后对同源的 admin API 请求会自动带上凭据,
-# 所以面板能用、扫描器/爆破者连登录页都摸不到。__PANEL_HASH__ 占位随后 sed 替换成 bcrypt 哈希
-# (哈希含 $,不能直接进 heredoc,故用占位符)。主域名 $M_HOST 那道 admin API 404 封锁原封不动。
+# 管理后台域:面板 UI 套 Basic Auth 门禁,API 走 Matrix token(两者都用 Authorization 头,
+# 不能同时套 basic_auth 否则 Bearer/Basic 打架——所以 basic_auth 只盖面板静态页,不盖 /_matrix、/_synapse)。
+# 面板、API 同源(都在本域名),Ketesa 的 restrictBaseUrl 锁到本域名,无跨域、无 CORS 预检。
+# admin API 只在本域名暴露(靠 admin token 保护),主域名 $M_HOST 那道 /_synapse/admin 404 原封不动。
+# __PANEL_HASH__ 占位随后 sed 替换成 bcrypt 哈希(哈希含 $,不能直接进 heredoc)。
 if [ "$PANEL_ENABLED" = "1" ]; then
 cat >> Caddyfile <<EOF
 
 $ADMIN_HOST {
-	basic_auth {
-		admin __PANEL_HASH__
+	handle /_matrix/* {
+		reverse_proxy synapse:8008
 	}
-	@api path /_matrix/* /_synapse/*
-	reverse_proxy @api synapse:8008
-	reverse_proxy ketesa:8080
+	handle /_synapse/* {
+		reverse_proxy synapse:8008
+	}
+	handle {
+		basic_auth {
+			admin __PANEL_HASH__
+		}
+		reverse_proxy ketesa:8080
+	}
 }
 EOF
   sed -i "s|__PANEL_HASH__|$PANEL_HASH|" Caddyfile
