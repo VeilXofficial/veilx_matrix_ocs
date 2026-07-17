@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 # =====================================================================
-#  Matrix 全功能一键安装脚本(通用版 v1.3)
+#  Matrix 全功能一键安装脚本(通用版 v1.4)
 #
-#  v1.3 修复:管理后台(Ketesa)进用户列表报 Failed to fetch / Load failed。
-#    根因是面板把 admin API 请求跑去了 matrix.<域名>(那里 /_synapse/admin 被 404
-#    且 Synapse 不发 CORS)。改为四道保险钉死"面板与 admin API 同源"在 admin.<域名>:
-#    ① config.json 加 wellKnownDiscovery:false  ② admin 域名自指 well-known
-#    ③ config.json 不套 Basic Auth 确保必定加载  ④ restrictBaseUrl 锁本域名。
+#  v1.4 修复(实机验证):管理后台进用户列表报 Failed to fetch / Load failed,
+#    浏览器控制台明确为 "blocked by CORS policy: No 'Access-Control-Allow-Origin'"。
+#    根因:面板跨域调 matrix.<域名>/_synapse/admin,而 Synapse 自身不发 CORS 头。
+#    正解:在 matrix.<域名> 上给 /_synapse/* 补 CORS 头 + 放行 OPTIONS 预检(见下方
+#    Caddyfile)。这样【自建后台】和【官方 admin.etke.cc】两种方式都能用。
+#    admin API 仍强制校验管理员 token(无 token 一律 401),公网可达但打不动。
+#  v1.3(旧尝试,保留 admin 域名同源代理作为备选,不影响 v1.4):
+#    admin.<域名> 上 config.json 加 wellKnownDiscovery:false + 自指 well-known。
 #
 #  License: PolyForm Noncommercial 1.0.0 —— 个人/非商业使用免费;
 #  ★除作者外禁止任何商业用途★,商业授权请联系作者(GitHub 提 Issue)。
@@ -859,10 +862,31 @@ $DOMAIN {
 }
 
 $M_HOST {
-	# 管理 API 不对公网开放(需要时经 SSH 隧道直连容器内 8008)
-	@admin path /_synapse/admin/* /_synapse/*/admin/*
-	respond @admin "Not found" 404
-	reverse_proxy synapse:8008
+	# /_synapse/*(含 admin API)跨域放行:浏览器管理后台(自建 admin.$DOMAIN 或官方
+	# admin.etke.cc)都要跨域调用它,而 Synapse 自身【不发】CORS 头 → 浏览器必然报
+	# "No 'Access-Control-Allow-Origin' header / blocked by CORS policy"。这里给它补上,
+	# 并对 OPTIONS 预检直接 204 放行。/_matrix 不在这里加(Synapse 自己会发,重复会冲突)。
+	# 安全不变:admin API 每个端点都强制校验管理员 token,无 token 一律 401,拿不到任何数据。
+	handle /_synapse/* {
+		@options method OPTIONS
+		handle @options {
+			header Access-Control-Allow-Origin "*"
+			header Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS"
+			header Access-Control-Allow-Headers "Authorization, Content-Type"
+			header Access-Control-Max-Age "600"
+			respond 204
+		}
+		handle {
+			reverse_proxy synapse:8008 {
+				header_down Access-Control-Allow-Origin "*"
+				header_down Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS"
+				header_down Access-Control-Allow-Headers "Authorization, Content-Type"
+			}
+		}
+	}
+	handle {
+		reverse_proxy synapse:8008
+	}
 }
 EOF
 
@@ -881,8 +905,9 @@ fi
 
 # 管理后台域:面板 UI 套 Basic Auth 门禁,API 走 Matrix token(两者都用 Authorization 头,
 # 不能同时套 basic_auth 否则 Bearer/Basic 打架——所以 basic_auth 只盖面板静态页,不盖 /_matrix、/_synapse)。
-# 面板、API 同源(都在本域名),Ketesa 的 restrictBaseUrl 锁到本域名,无跨域、无 CORS 预检。
-# admin API 只在本域名暴露(靠 admin token 保护),主域名 $M_HOST 那道 /_synapse/admin 404 原封不动。
+# 面板、API 同源(都在本域名)是理想路径;但即便 config.json 没加载、面板退回跨域调
+# matrix.$DOMAIN,v1.4 已在主域名给 /_synapse/* 补了 CORS,照样能通(双保险)。
+# 若你只想用官方 admin.etke.cc,这个自建 admin.$DOMAIN 块可有可无——CORS 那道才是关键。
 # __PANEL_HASH__ 占位随后 sed 替换成 bcrypt 哈希(哈希含 $,不能直接进 heredoc)。
 if [ "$PANEL_ENABLED" = "1" ]; then
 cat >> Caddyfile <<EOF
