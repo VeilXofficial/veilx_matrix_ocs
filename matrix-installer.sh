@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 # =====================================================================
-#  Matrix 全功能一键安装脚本(通用版 v1.2)
+#  Matrix 全功能一键安装脚本(通用版 v1.3)
+#
+#  v1.3 修复:管理后台(Ketesa)进用户列表报 Failed to fetch / Load failed。
+#    根因是面板把 admin API 请求跑去了 matrix.<域名>(那里 /_synapse/admin 被 404
+#    且 Synapse 不发 CORS)。改为四道保险钉死"面板与 admin API 同源"在 admin.<域名>:
+#    ① config.json 加 wellKnownDiscovery:false  ② admin 域名自指 well-known
+#    ③ config.json 不套 Basic Auth 确保必定加载  ④ restrictBaseUrl 锁本域名。
 #
 #  License: PolyForm Noncommercial 1.0.0 —— 个人/非商业使用免费;
 #  ★除作者外禁止任何商业用途★,商业授权请联系作者(GitHub 提 Issue)。
@@ -882,6 +888,21 @@ if [ "$PANEL_ENABLED" = "1" ]; then
 cat >> Caddyfile <<EOF
 
 $ADMIN_HOST {
+	# 让面板的服务发现停在本域名(同源)。Ketesa 登录后默认会按 well-known 把 admin API
+	# "规范化"到 matrix.$DOMAIN,而那里 /_synapse/admin/* 被 404 且 Synapse 不发 CORS
+	# → 前端必然 Failed to fetch / Load failed。这里把 base_url 指回本域名,配合
+	# config.json 的 wellKnownDiscovery:false,双保险钉死同源,admin API 走下面的代理直连。
+	handle /.well-known/matrix/client {
+		header Content-Type application/json
+		header Access-Control-Allow-Origin *
+		respond \`{"m.homeserver":{"base_url":"https://$ADMIN_HOST"}}\` 200
+	}
+	# config.json 不含机密,单独放行(不套 Basic Auth):确保浏览器一定能加载到
+	# restrictBaseUrl/wellKnownDiscovery。它一旦加载失败,面板会退回"用用户名域名猜服务器"
+	# 的老路,又被带去 matrix.$DOMAIN 撞 404 —— 这是整套同源方案最关键的一环,务必放行。
+	handle /config.json {
+		reverse_proxy ketesa:8080
+	}
 	handle /_matrix/* {
 		reverse_proxy synapse:8008
 	}
