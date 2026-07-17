@@ -818,9 +818,14 @@ fi
 # Ketesa 面板配置:把 homeserver 锁定成面板自己的域名(同源),用户登录连地址都不用填
 if [ "$PANEL_ENABLED" = "1" ]; then
   mkdir -p data/ketesa
+  # restrictBaseUrl: 锁死到本域名(同源);wellKnownDiscovery=false: 关键!
+  # 否则 Ketesa 登录后会按 Synapse 的 well-known 把 admin API 请求"规范化"到
+  # matrix.$DOMAIN,而那里 /_synapse/admin/* 被 404 且无 CORS → 前端报 Failed to fetch。
+  # 关掉规范化后,所有请求都留在 admin.$DOMAIN,经本域名 /_synapse/* 代理直连 Synapse。
   cat > data/ketesa/config.json <<EOF
 {
-  "restrictBaseUrl": "https://$ADMIN_HOST"
+  "restrictBaseUrl": "https://$ADMIN_HOST",
+  "wellKnownDiscovery": false
 }
 EOF
 fi
