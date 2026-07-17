@@ -46,23 +46,25 @@
 - **怎么确认当前系统**:连上服务器(见第 3 步)后执行 `cat /etc/os-release`,看 `VERSION` 是不是 22.04 / 24.04
 - 装错了也不怕:脚本检测到不支持的系统会用中文明确告诉你,不会乱装
 
-## 第 1 步:给域名添加 4 条解析记录(约 2 分钟)
+## 第 1 步:给域名添加 5 条解析记录(约 2 分钟)
 
-登录你**买域名的网站**,找到「域名解析 / DNS 解析 / DNS Records」,添加 **4 条 A 记录**。
+登录你**买域名的网站**,找到「域名解析 / DNS 解析 / DNS Records」,添加 **5 条 A 记录**。
 
 假设你的域名是 `mychat.org`,服务器公网 IP 是 `1.2.3.4`,就这样填:
 
-| 记录类型 | 主机记录(名称) | 记录值(指向) |
-|---|---|---|
-| A | `@`(代表主域名) | `1.2.3.4` |
-| A | `matrix` | `1.2.3.4` |
-| A | `livekit` | `1.2.3.4` |
-| A | `matrix-rtc` | `1.2.3.4` |
+| 记录类型 | 主机记录(名称) | 记录值(指向) | 用途 |
+|---|---|---|---|
+| A | `@`(代表主域名) | `1.2.3.4` | 主域名 |
+| A | `matrix` | `1.2.3.4` | 聊天服务器 |
+| A | `admin` | `1.2.3.4` | 网页管理后台 |
+| A | `livekit` | `1.2.3.4` | 通话(关通话可省) |
+| A | `matrix-rtc` | `1.2.3.4` | 通话(关通话可省) |
 
 > 📌 主机记录只填 `matrix` 这样的**前缀**,不要填完整的 `matrix.mychat.org`(面板会自动补全)。
 > 📌 服务器公网 IP 在你买服务器的控制台首页能看到。
 > 📌 添加后一般 1~10 分钟生效;没生效也没关系,安装脚本会自动等待。
-> ⚠️ **用 Cloudflare 管理域名的注意**:这 4 条记录的"代理状态"必须是**灰色云(仅 DNS)**,不能开橙色云(代理)——橙色云会挡住通话流量。点一下那朵云就能切换。
+> 📌 关闭通话时只需前 3 条(`@` / `matrix` / `admin`);`admin` 少加也能装,只是网页后台暂时打不开,补上即可。
+> ⚠️ **用 Cloudflare 管理域名的注意**:这几条记录的"代理状态"必须是**灰色云(仅 DNS)**,不能开橙色云(代理)——橙色云会挡住通话流量。点一下那朵云就能切换。
 
 ## 第 2 步:放行端口(约 1 分钟)
 
@@ -114,11 +116,11 @@ sudo bash matrix.sh
    | 选项 | 直接回车(推荐) | 好处 | 其他选择及风险 |
    |---|---|---|---|
    | 注册方式 | **关闭注册** | 外人连注册入口都没有;员工账号由管理员统一发放,离职即删 | 邀请码注册(码泄露=陌生人可进);完全开放(垃圾账号灌爆,商用勿选) |
-   | 语音视频通话 | **开启** | 团队开会不再依赖腾讯会议/Zoom,会议内容不出你的服务器 | 关闭:适合 1GB 小内存机器,DNS 也只需前 2 条记录 |
+   | 语音视频通话 | **开启** | 团队开会不再依赖腾讯会议/Zoom,会议内容不出你的服务器 | 关闭:适合 1GB 小内存机器,DNS 也只需前 3 条记录(`@` / `matrix` / `admin`) |
    | 联邦互通 | **关闭** | 服务器成为孤岛,外部任何人无法向成员发消息,零骚扰零钓鱼 | 开启:可与 matrix.org 等外部用户互聊,但暴露面变大 |
 
 3. 向导列出第 1、2 步的检查清单 → 确认做过了就按回车
-4. 之后全自动:检测 DNS(没生效自动等)→ 装 Docker → 生成所有密码密钥 → 启动服务 → 申请 HTTPS 证书 → 创建管理员
+4. 之后全自动:检测 DNS(没生效自动等)→ 装 Docker → 生成所有密码密钥 → 启动服务(含网页管理后台)→ 申请 HTTPS 证书 → 创建管理员
 
 > 🤖 进阶:想跳过询问全自动安装?用环境变量预设,例如
 > `REG_MODE=token ENABLE_CALLS=1 ENABLE_FEDERATION=0 sudo -E bash matrix.sh mychat.org`
@@ -133,10 +135,15 @@ sudo bash matrix.sh
    服务器:  mychat.org
    账号:    admin
    密码:    xxxxxxxxxxxx
+
+ 网页管理后台(admin.etke.cc 同款,自托管在你服务器上):
+   打开 https://admin.mychat.org
+   ① 浏览器先弹密码框 → 输 admin / 网页门禁密码
+   ② 再用管理员 admin / 上面的密码 登录
 ========================================================
 ```
 
-> 🔑 **把账号密码抄下来!** 它也永久保存在服务器 `/opt/matrix/CREDENTIALS.txt`(随时 `cat /opt/matrix/CREDENTIALS.txt` 查看)。
+> 🔑 **把账号密码 + 网页门禁密码都抄下来!** 全部永久保存在服务器 `/opt/matrix/CREDENTIALS.txt`(随时 `cat /opt/matrix/CREDENTIALS.txt` 查看)。
 > ⚠️ 如果结尾显示"部分完成",按屏幕中文提示处理;脚本可放心重复运行,不会弄坏已装好的部分。
 
 ## 第 5 步:手机 / 电脑登录使用
@@ -156,17 +163,27 @@ sudo bash matrix.sh
 
 ---
 
-## 👥 添加团队成员
+## 👥 管理团队:网页后台(推荐,零终端)
 
-SSH 连上服务器后:
+安装时会自动部署一个**自托管的网页管理后台**——就是 [admin.etke.cc](https://admin.etke.cc) 用的那套面板(Ketesa),只不过跑在**你自己的服务器**上,数据不经任何第三方。**不用记命令、不用连服务器**,浏览器点鼠标就能管:建号 / 改密 / 封禁 / 建群 / 删消息 / 清媒体 / 发注册邀请码。
+
+**怎么进**(浏览器打开即可):
+
+1. 访问 `https://admin.你的域名`
+2. 浏览器先弹一个密码框(网页门禁)→ 用户名 `admin`,密码填**网页门禁密码**
+3. 进去后再用**管理员账号** `admin` + 管理员密码登录
+
+> 🔑 两个密码都在服务器 `/opt/matrix/CREDENTIALS.txt` 里(部署完成卡片也打印了)。
+> 🔒 **为什么要输两次密码?** 第一道"网页门禁"是独立的锁,把管理后台挡在公网扫描之外;管理 API 从不对外裸奔。两把独立的锁,专为敏感场景设计。
+> 📌 打不开?多半是没给 `admin.你的域名` 加 DNS 记录(第 1 步),补上后等几分钟 Caddy 自动签好证书即可。
+
+**命令行方式**(可选,适合习惯终端的人):
 
 ```bash
 cd /opt/matrix && sudo bash matrix-installer.sh adduser
 ```
 
 按提示输入新成员用户名、密码;问到 `Make admin` 时普通成员直接回车,管理员输 `yes`。然后把「你的域名 + 用户名 + 密码」发给成员登录即可。
-
-> 🖱️ 喜欢图形界面?浏览器打开 [admin.etke.cc](https://admin.etke.cc),Homeserver URL 填 `https://matrix.你的域名`,用 admin 登录,即可点鼠标管理用户(建号/改密/封禁)。
 
 ## 🔧 日常维护:管理菜单(SSH 到服务器后执行)
 
@@ -192,7 +209,7 @@ cd /opt/matrix && sudo bash matrix-installer.sh
 <summary>不用菜单,想直接敲命令?(点开)</summary>
 
 ```bash
-cd /opt/matrix && docker compose ps                              # 服务状态(开通话 5 个 / 关通话 3 个)
+cd /opt/matrix && docker compose ps                              # 服务状态(开通话 6 个 / 关通话 4 个,含管理后台)
 cd /opt/matrix && docker compose logs -f synapse                 # 看日志(Ctrl+C 退出)
 cd /opt/matrix && docker compose up -d                           # 重启
 cd /opt/matrix && docker compose pull && docker compose up -d    # 升级到最新版
@@ -225,7 +242,8 @@ scp root@你的服务器IP:/opt/matrix/matrix-backup-*.tar.gz ~/Desktop/
 | 问题 | 原因与解决 |
 |---|---|
 | 粘贴命令报 `wget: command not found` 或 `sudo 不是内部命令` | 命令贴错地方了——要先完成**第 3 步 `ssh` 连上服务器**,在服务器的终端里粘贴,不是在自己电脑本地 |
-| 登录提示"这不是 Matrix 服务器" | HTTPS 证书还没就绪。多等几分钟;确认第 1 步 4 条解析都指对了 IP,再 `cd /opt/matrix && docker compose restart caddy` |
+| 登录提示"这不是 Matrix 服务器" | HTTPS 证书还没就绪。多等几分钟;确认第 1 步 5 条解析都指对了 IP,再 `cd /opt/matrix && docker compose restart caddy` |
+| 网页后台 `admin.你的域名` 打不开 | 多半是没加 `admin` 那条 DNS 记录,或证书还没签好;补记录、等几分钟。忘了门禁密码就 `cat /opt/matrix/CREDENTIALS.txt` |
 | 通话能接通,但没声音没画面 | 99% 是第 2 步的 **7882/UDP** 没放行,去服务商安全组补上 |
 | 安装时一直"DNS 还没生效" | 检查解析:类型是不是 **A**、主机记录是不是只填**前缀**、IP 有没有抄错 |
 | 忘记 admin 密码 | `cat /opt/matrix/CREDENTIALS.txt`;或重跑 adduser 建个新管理员 |
@@ -240,7 +258,7 @@ scp root@你的服务器IP:/opt/matrix/matrix-backup-*.tar.gz ~/Desktop/
 └── matrix-installer.sh    一键安装脚本(全部逻辑都在这一个文件里,可自行审计)
 ```
 
-**装好后的服务端组件**:Caddy(自动 HTTPS)+ Synapse + PostgreSQL + LiveKit + lk-jwt-service,全部 Docker 编排,开源可审计。
+**装好后的服务端组件**:Caddy(自动 HTTPS)+ Synapse + PostgreSQL + Ketesa(网页管理后台)+ LiveKit + lk-jwt-service,全部 Docker 编排,开源可审计。
 
 ## 📄 许可(注意:禁止商用)
 
