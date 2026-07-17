@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # =====================================================================
-#  Matrix 全功能一键安装脚本(通用版 v1.5)
+#  Matrix 全功能一键安装脚本(通用版 v1.6)
 #
+#  v1.6 新增:开启内核自带的 BBR 拥塞控制(fq + bbr),TCP 传输(网页/App、媒体文件收发、
+#    跨境弱网)更顺;UDP 语音视频通话不受影响。容器型 VPS 内核只读时自动跳过、不影响安装。
 #  v1.5 新增:①磁盘守卫+媒体清理(容器日志轮转 10MB×3、远端缓存媒体按 REMOTE_MEDIA_DAYS
 #    天自动清、菜单第 7 项/`cleanup` 子命令手动清理、每日 cron 磁盘偏高自动回收 Docker 冗余;
 #    本地文件默认永久保留,仅显式 LOCAL_MEDIA_DAYS 才按期删)。②消息留存/自动销毁(安装
@@ -678,7 +680,7 @@ docker compose version >/dev/null 2>&1 \
 # ---------------------------------------------------------------------
 # 3. 内存档位与 Swap(swap 失败不影响安装)
 # ---------------------------------------------------------------------
-bold "3/9 内存与 Swap"
+bold "3/9 内存 / Swap / BBR"
 RAM_MB="$(awk '/^MemTotal:/{print int($2/1024)}' /proc/meminfo)"
 if [ "${RAM_MB:-0}" -lt 4000 ] && [ -z "$(swapon --show --noheadings 2>/dev/null)" ]; then
   if { fallocate -l 3G /swapfile 2>/dev/null \
@@ -695,6 +697,26 @@ if [ "${RAM_MB:-0}" -lt 4000 ] && [ -z "$(swapon --show --noheadings 2>/dev/null
 else
   echo "内存 ${RAM_MB:-?}MB,swap 状态 OK,跳过。"
 fi
+
+# ---- BBR 拥塞控制(内核自带,开关即用;对 TCP 有效:网页/App、媒体文件收发、跨境弱网更顺;
+#      UDP 语音视频通话不受影响)。容器型 VPS 内核只读时会失败——只警告,绝不影响安装。----
+if modprobe tcp_bbr 2>/dev/null \
+   || grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null; then
+  cat > /etc/sysctl.d/99-matrix-bbr.conf <<'EOF'
+net.core.default_qdisc=fq
+net.ipv4.tcp_congestion_control=bbr
+EOF
+  { sysctl -p /etc/sysctl.d/99-matrix-bbr.conf || sysctl --system; } >/dev/null 2>&1 || true
+  CC_NOW="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo unknown)"
+  if [ "$CC_NOW" = "bbr" ]; then
+    echo "已启用 BBR 拥塞控制(TCP 传输更顺;重启后依然生效)。"
+  else
+    warn "BBR 配置已写入但当前生效的是 ${CC_NOW}(容器型 VPS 常见,内核由宿主机管);重启后若仍非 bbr,说明该 VPS 不放开,忽略即可。"
+  fi
+else
+  warn "当前内核不支持 BBR(少见,多为容器型 VPS),已跳过,不影响安装。"
+fi
+
 if [ "${RAM_MB:-0}" -ge 7500 ]; then
   SYNAPSE_MEM=3g; POSTGRES_MEM=1500m; LIVEKIT_MEM=512m; CACHE_FACTOR=1.0; EVENT_CACHE=10K
 elif [ "${RAM_MB:-0}" -ge 3500 ]; then
