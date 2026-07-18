@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # =====================================================================
-#  Matrix 全功能一键安装脚本(通用版 v1.6)
+#  Matrix 全功能一键安装脚本(通用版 v1.7)
 #
+#  v1.7 新增:单文件上传上限做成可调项 MAX_UPLOAD_SIZE(默认 100M,持久化到 .env,
+#    改法: MAX_UPLOAD_SIZE=500M sudo -E bash matrix-installer.sh config)。Caddy 默认
+#    不限请求体,只 Synapse 这一处生效,故改这一个即可。
 #  v1.6 新增:开启内核自带的 BBR 拥塞控制(fq + bbr),TCP 传输(网页/App、媒体文件收发、
 #    跨境弱网)更顺;UDP 语音视频通话不受影响。容器型 VPS 内核只读时自动跳过、不影响安装。
 #  v1.5 新增:①磁盘守卫+媒体清理(容器日志轮转 10MB×3、远端缓存媒体按 REMOTE_MEDIA_DAYS
@@ -435,7 +438,7 @@ ask_opt() {  # $1=提示 $2=默认值 → 结果放入 REPLY
 
 # 记录哪些选项是用户用环境变量显式指定的(config 模式免交互的依据)
 EXPLICIT_OPTS=0
-[ -n "${REG_MODE:-}${ENABLE_CALLS:-}${ENABLE_FEDERATION:-}${MSG_RETENTION_DAYS:-}${LOCAL_MEDIA_DAYS:-}" ] && EXPLICIT_OPTS=1
+[ -n "${REG_MODE:-}${ENABLE_CALLS:-}${ENABLE_FEDERATION:-}${MSG_RETENTION_DAYS:-}${LOCAL_MEDIA_DAYS:-}${MAX_UPLOAD_SIZE:-}" ] && EXPLICIT_OPTS=1
 
 REG_MODE="${REG_MODE:-$(env_saved REG_MODE)}"
 ENABLE_CALLS="${ENABLE_CALLS:-$(env_saved ENABLE_CALLS)}"
@@ -444,6 +447,11 @@ MSG_RETENTION_DAYS="${MSG_RETENTION_DAYS:-$(env_saved MSG_RETENTION_DAYS)}"
 # 媒体保留天数(磁盘守卫):远端缓存默认 14 天自动清;本地文件默认空=永久保留
 REMOTE_MEDIA_DAYS="${REMOTE_MEDIA_DAYS:-$(env_saved REMOTE_MEDIA_DAYS)}"; REMOTE_MEDIA_DAYS="${REMOTE_MEDIA_DAYS:-14}"
 LOCAL_MEDIA_DAYS="${LOCAL_MEDIA_DAYS:-$(env_saved LOCAL_MEDIA_DAYS)}"
+# 单文件上传上限(如 100M / 500M / 1G);Caddy 默认不限请求体,只 Synapse 这一处生效
+MAX_UPLOAD_SIZE="${MAX_UPLOAD_SIZE:-$(env_saved MAX_UPLOAD_SIZE)}"; MAX_UPLOAD_SIZE="${MAX_UPLOAD_SIZE:-100M}"
+MAX_UPLOAD_SIZE="$(echo "$MAX_UPLOAD_SIZE" | tr 'a-z' 'A-Z' | tr -d '[:space:]')"
+MAX_UPLOAD_SIZE="${MAX_UPLOAD_SIZE%B}"   # 容错:500MB/1GB → 500M/1G(Synapse 只认 K/M/G)
+case "$MAX_UPLOAD_SIZE" in ''|*[!0-9KMG]*) MAX_UPLOAD_SIZE=100M ;; [0-9]*) : ;; *) MAX_UPLOAD_SIZE=100M ;; esac
 
 # 各选项的"回车默认值"(全新安装=推荐值;config 模式=当前值)
 DEF_REG="1"; DEF_CALLS="Y"; DEF_FED="N"; DEF_RET="0"
@@ -849,6 +857,7 @@ ENABLE_FEDERATION=$ENABLE_FEDERATION
 MSG_RETENTION_DAYS=$MSG_RETENTION_DAYS
 REMOTE_MEDIA_DAYS=$REMOTE_MEDIA_DAYS
 LOCAL_MEDIA_DAYS=$LOCAL_MEDIA_DAYS
+MAX_UPLOAD_SIZE=$MAX_UPLOAD_SIZE
 SYNAPSE_MEM=$SYNAPSE_MEM
 POSTGRES_MEM=$POSTGRES_MEM
 LIVEKIT_MEM=$LIVEKIT_MEM
@@ -1148,6 +1157,7 @@ docker compose config -q || die "生成的 compose 配置校验失败"
 # 7. Synapse 配置
 # ---------------------------------------------------------------------
 bold "6/9 生成 Synapse 配置"
+echo "  文件上传上限: ${MAX_UPLOAD_SIZE}(改法: MAX_UPLOAD_SIZE=500M sudo -E bash matrix-installer.sh config)"
 mkdir -p data/synapse
 if [ ! -f "data/synapse/$DOMAIN.signing.key" ]; then
   docker run --rm \
@@ -1199,7 +1209,7 @@ database:
 
 log_config: "/data/$DOMAIN.log.config"
 media_store_path: /data/media_store
-max_upload_size: "100M"
+max_upload_size: "$MAX_UPLOAD_SIZE"
 
 registration_shared_secret: "$REG_SECRET"
 macaroon_secret_key: "$MACAROON"
