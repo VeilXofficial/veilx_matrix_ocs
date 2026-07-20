@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # =====================================================================
-#  Matrix 轻量一键安装脚本 · tuwunel 版(通用版 t1.2)
+#  Matrix 轻量一键安装脚本 · tuwunel 版(通用版 t1.4)
+#  t1.4: 新增【自更新】:老部署想拿新功能,`sudo tuwunel update` 一条命令从 GitHub 拉最新脚本
+#        并自动应用(数据/账号不动);或重跑一键安装命令也会刷新本地脚本+全局命令。
+#  t1.3: 新增可选【自托管 Element Web 网页客户端】(默认开):成员打开 https://你的域名
+#        就能直接注册/登录/聊天,不用去 element.io、不用装 App;锁定到你的服务器、可白标。
 #  t1.2: 装完注册全局命令 `sudo tuwunel`(开菜单/加人不用记路径、不用带域名);
 #        支持 GitHub 一条命令安装(bash <(curl ...));命令行不带域名时向导交互询问。
 #  t1.1: 装完【自动建好管理员并打印账号密码】;adduser 一条命令建号并设密码
@@ -19,7 +23,7 @@
 #    本脚本已把建管理员/加成员做成一条命令(CLI 便利与 Synapse 版持平),但"零终端
 #    网页点鼠标管理"这一项 tuwunel 生态给不了成熟货 —— 要 Ketesa 那种后台请用 Synapse 版。
 #
-#  组件: Caddy(自动HTTPS) + tuwunel  (+ 可选 LiveKit + lk-jwt-service 通话)
+#  组件: Caddy(自动HTTPS) + tuwunel  (+ 可选 Element Web 网页客户端 / LiveKit 通话)
 #  客户端: Element X / Element Web / 任意 Matrix 客户端
 #
 #  用法:
@@ -33,6 +37,7 @@
 #   装完后会注册一个全局命令,以后就这么用(不用记路径、不用再带域名):
 #      sudo tuwunel            # 打开中文管理菜单
 #      sudo tuwunel adduser    # 加成员(一条命令建号并设密码)
+#      sudo tuwunel update     # 从 GitHub 拉最新脚本并应用新功能(数据不动)
 #      sudo tuwunel config     # 改配置    sudo tuwunel uninstall  # 卸载
 #   (curl|bash 管道模式想让菜单/adduser 可用,设 TUWUNEL_INSTALLER_URL=<上面URL> 让它自取副本)
 #
@@ -57,6 +62,15 @@ set -euo pipefail
 INSTALL_DIR="${INSTALL_DIR:-/opt/tuwunel}"
 MARKER="由 tuwunel-installer.sh 生成"
 TUWUNEL_IMAGE="ghcr.io/matrix-construct/tuwunel:latest"
+# 自更新用的脚本原始地址(可用 TUWUNEL_UPDATE_URL 覆盖为你的 fork 或加速镜像)
+REPO_RAW="${TUWUNEL_UPDATE_URL:-https://raw.githubusercontent.com/VeilXofficial/veilx_matrix_ocs/main/matrix-tuwunel-installer.sh}"
+
+# (重新)安装全局命令 `tuwunel` 指向已装好的脚本副本
+install_launcher() {
+  [ -f "$1" ] && [ -d /usr/local/bin ] || return 0
+  printf '#!/usr/bin/env bash\nexec bash %s "$@"\n' "$1" > /usr/local/bin/tuwunel 2>/dev/null \
+    && chmod +x /usr/local/bin/tuwunel 2>/dev/null || true
+}
 
 # ---- 终端配色(仅真终端启用;重定向/NO_COLOR 时自动关闭)----
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
@@ -166,7 +180,8 @@ menu_status() {
   cd "$INSTALL_DIR"
   local d; d="$(env_saved MATRIX_DOMAIN)"
   echo ""; echo "── 当前配置 ──"
-  echo "  域名: ${d:-未知}   注册: $(env_saved REG_MODE)   联邦: $([ "$(env_saved ENABLE_FEDERATION)" = "1" ] && echo 开 || echo 关)   通话: $([ "$(env_saved ENABLE_CALLS)" = "1" ] && echo 开 || echo 关)   大文件上限: $(human "$(env_saved MAX_UPLOAD_BYTES)")"
+  echo "  域名: ${d:-未知}   注册: $(env_saved REG_MODE)   联邦: $([ "$(env_saved ENABLE_FEDERATION)" = "1" ] && echo 开 || echo 关)   通话: $([ "$(env_saved ENABLE_CALLS)" = "1" ] && echo 开 || echo 关)   网页: $([ "$(env_saved ENABLE_WEB)" = "1" ] && echo 开 || echo 关)   大文件: $(human "$(env_saved MAX_UPLOAD_BYTES)")"
+  [ "$(env_saved ENABLE_WEB)" = "1" ] && echo "  网页客户端: https://${d}(成员浏览器直接注册/登录)"
   echo "── 容器状态 ──"; docker compose ps 2>/dev/null || true
   echo "── 资源占用 ──"
   local pct; pct="$(df . 2>/dev/null | awk 'NR==2{gsub(/%/,"",$5);print $5}')"; pct="${pct:-0}"
@@ -206,6 +221,27 @@ SELF_SRC=""; [ -f "${0:-}" ] && SELF_SRC="$(cd "$(dirname -- "$0")" && pwd)/$(ba
 # ---------------------------------------------------------------------
 if [ "${1:-}" = "diskguard" ]; then disk_guard; exit 0; fi
 if [ "${1:-}" = "cleanup" ]; then [ -d "$INSTALL_DIR" ] || die "找不到 $INSTALL_DIR"; menu_cleanup; exit 0; fi
+
+# 子命令: update —— 从 GitHub 拉最新脚本,替换本地副本+全局命令,再自动应用新功能(不动数据)
+if [ "${1:-}" = "update" ]; then
+  [ -d "$INSTALL_DIR" ] || die "找不到 $INSTALL_DIR,先完成部署"
+  SELF_DST="$INSTALL_DIR/tuwunel-installer.sh"; tmp="$(mktemp)"
+  bold "更新脚本:从 $REPO_RAW 拉取最新…"
+  if ! curl -fsSL "$REPO_RAW" -o "$tmp" 2>/dev/null; then
+    rm -f "$tmp"; die "下载失败(网络/被墙?)。国内可: TUWUNEL_UPDATE_URL=<加速镜像地址> sudo -E tuwunel update"
+  fi
+  # 安全校验:必须是本脚本(含标识)且语法正确,才替换
+  if grep -q "$MARKER" "$tmp" && bash -n "$tmp" 2>/dev/null; then
+    cp -f "$tmp" "$SELF_DST" 2>/dev/null && chmod +x "$SELF_DST" 2>/dev/null || true
+    install_launcher "$SELF_DST"; rm -f "$tmp"
+    NEWV="$(grep -m1 '通用版 t' "$SELF_DST" | grep -oE 't[0-9]+\.[0-9]+' || echo 未知)"
+    ok "脚本已更新到 $NEWV。"
+    echo "==> 应用新配置(会问你几个选项,数据/账号一律不动)…"
+    exec bash "$SELF_DST" config
+  else
+    rm -f "$tmp"; die "下载到的文件校验不通过(可能是错误页/被镜像篡改),已放弃,未改动任何东西。"
+  fi
+fi
 
 if [ "${1:-}" = "adduser" ]; then
   [ -d "$INSTALL_DIR" ] || die "找不到 $INSTALL_DIR,先完成部署"
@@ -275,7 +311,11 @@ if [ "${1:-}" = "config" ]; then RECONFIG=1; set --; fi
 if [ "$RECONFIG" -eq 0 ] && [ -f "$INSTALL_DIR/CREDENTIALS.txt" ] \
    && grep -q "$MARKER" "$INSTALL_DIR/tuwunel.toml" 2>/dev/null; then
   cd "$INSTALL_DIR"; SELF_BIN="$INSTALL_DIR/tuwunel-installer.sh"
-  [ ! -f "$SELF_BIN" ] && [ -f "${0:-}" ] && cp -f "$0" "$SELF_BIN" 2>/dev/null || true
+  # 重跑安装命令时,把本地脚本副本刷新成当前这份(这样老部署重跑一键命令即可拿到新版),并刷新全局命令
+  if [ -f "${0:-}" ] && [ "$(readlink -f -- "${0:-}" 2>/dev/null)" != "$(readlink -f -- "$SELF_BIN" 2>/dev/null)" ]; then
+    cp -f "$0" "$SELF_BIN" 2>/dev/null || true
+  fi
+  install_launcher "$SELF_BIN"
   if has_tty; then
     MENU_DOMAIN="$(env_saved MATRIX_DOMAIN)"
     while :; do
@@ -286,17 +326,18 @@ if [ "$RECONFIG" -eq 0 ] && [ -f "$INSTALL_DIR/CREDENTIALS.txt" ] \
 └──────────────────────────────────────────────┘
   1) 查看运行状态
   2) 添加团队成员(一条命令建号并设密码)
-  3) 修改配置(注册 / 联邦 / 通话 / 大文件上限)
+  3) 修改配置(注册 / 联邦 / 通话 / 网页 / 大文件)
   4) 立即备份(配置 + 数据库 + 媒体)
-  5) 升级到最新版本
+  5) 升级服务镜像(docker 拉最新)
   6) 清理磁盘
   7) 重启所有服务
-  8) 彻底卸载
+  8) 更新脚本 + 应用新功能(从 GitHub 拉最新,数据不动)
+  9) 彻底卸载
   0) 退出
 EOF
       MCHOICE=""
-      if [ -t 0 ]; then read -rp "请选择 [0-8]: " MCHOICE || exit 0
-      else read -rp "请选择 [0-8]: " MCHOICE < /dev/tty 2>/dev/null || exit 0; fi
+      if [ -t 0 ]; then read -rp "请选择 [0-9]: " MCHOICE || exit 0
+      else read -rp "请选择 [0-9]: " MCHOICE < /dev/tty 2>/dev/null || exit 0; fi
       case "$MCHOICE" in
         1) menu_status ;;
         2) [ -f "$SELF_BIN" ] && bash "$SELF_BIN" adduser || warn "缺少脚本副本" ;;
@@ -306,10 +347,12 @@ EOF
            { docker compose pull -q && docker compose up -d --remove-orphans && ok "升级完成"; } || warn "升级失败: docker compose logs --tail 30" ;;
         6) menu_cleanup ;;
         7) { docker compose up -d && docker compose restart; } >/dev/null 2>&1 && ok "已重启" || warn "重启失败: docker compose ps" ;;
-        8) [ -f "$SELF_BIN" ] && INSTALL_DIR="$INSTALL_DIR" bash "$SELF_BIN" uninstall || warn "缺少脚本副本"
+        8) [ -f "$SELF_BIN" ] && INSTALL_DIR="$INSTALL_DIR" bash "$SELF_BIN" update || warn "缺少脚本副本"
+           [ -d "$INSTALL_DIR" ] || exit 0 ;;
+        9) [ -f "$SELF_BIN" ] && INSTALL_DIR="$INSTALL_DIR" bash "$SELF_BIN" uninstall || warn "缺少脚本副本"
            [ -d "$INSTALL_DIR" ] || exit 0 ;;
         0|q|Q) echo "再见。"; exit 0 ;;
-        *) warn "无效选择,请输入 0-8" ;;
+        *) warn "无效选择,请输入 0-9" ;;
       esac
       press_enter "
 按回车返回菜单… "
@@ -348,29 +391,31 @@ bold "目标: $DOMAIN  →  服务器 ${PUBLIC_IP:-未知}  →  目录 $INSTALL
 # ---------------------------------------------------------------------
 # 选项(回车=推荐默认;重跑沿用;环境变量可预设)
 # ---------------------------------------------------------------------
-EXPLICIT=0; [ -n "${REG_MODE:-}${ENABLE_FEDERATION:-}${ENABLE_CALLS:-}${MAX_UPLOAD:-}" ] && EXPLICIT=1
+EXPLICIT=0; [ -n "${REG_MODE:-}${ENABLE_FEDERATION:-}${ENABLE_CALLS:-}${ENABLE_WEB:-}${MAX_UPLOAD:-}" ] && EXPLICIT=1
 REG_MODE="${REG_MODE:-$(env_saved REG_MODE)}"
 ENABLE_FEDERATION="${ENABLE_FEDERATION:-$(env_saved ENABLE_FEDERATION)}"
 ENABLE_CALLS="${ENABLE_CALLS:-$(env_saved ENABLE_CALLS)}"
+ENABLE_WEB="${ENABLE_WEB:-$(env_saved ENABLE_WEB)}"   # 自托管 Element Web 网页客户端(你的域名注册/登录)
 MAX_UPLOAD="${MAX_UPLOAD:-}"
 SAVED_BYTES="$(env_saved MAX_UPLOAD_BYTES)"
 
-DEF_REG=1; DEF_FED=N; DEF_CALL=n
+DEF_REG=1; DEF_FED=N; DEF_CALL=n; DEF_WEB=Y
 if [ "$RECONFIG" -eq 1 ] && [ "$EXPLICIT" -eq 0 ]; then
   has_tty || die "config 需交互终端;或用环境变量: ENABLE_CALLS=1 sudo -E bash tuwunel-installer.sh config"
   case "$REG_MODE" in open) DEF_REG=2;; *) DEF_REG=1;; esac
   [ "$ENABLE_FEDERATION" = "1" ] && DEF_FED=y || DEF_FED=N
   [ "$ENABLE_CALLS" = "1" ] && DEF_CALL=Y || DEF_CALL=n
-  echo ""; echo "当前: 注册[$REG_MODE] · 联邦[$([ "$ENABLE_FEDERATION" = "1" ] && echo 开 || echo 关)] · 通话[$([ "$ENABLE_CALLS" = "1" ] && echo 开 || echo 关)] · 大文件[$(human "${SAVED_BYTES:-4294967296}")]"
+  [ "$ENABLE_WEB" = "0" ] && DEF_WEB=n || DEF_WEB=Y
+  echo ""; echo "当前: 注册[$REG_MODE] · 联邦[$([ "$ENABLE_FEDERATION" = "1" ] && echo 开 || echo 关)] · 通话[$([ "$ENABLE_CALLS" = "1" ] && echo 开 || echo 关)] · 网页客户端[$([ "$ENABLE_WEB" = "1" ] && echo 开 || echo 关)] · 大文件[$(human "${SAVED_BYTES:-4294967296}")]"
   echo "直接回车 = 保持当前值。"
-  REG_MODE=""; ENABLE_FEDERATION=""; ENABLE_CALLS=""
+  REG_MODE=""; ENABLE_FEDERATION=""; ENABLE_CALLS=""; ENABLE_WEB=""
 fi
 
-if has_tty && { [ -z "$REG_MODE" ] || [ -z "$ENABLE_FEDERATION" ] || [ -z "$ENABLE_CALLS" ]; }; then
+if has_tty && { [ -z "$REG_MODE" ] || [ -z "$ENABLE_FEDERATION" ] || [ -z "$ENABLE_CALLS" ] || [ -z "$ENABLE_WEB" ]; }; then
   printf '\n%s安装选项:看不懂就直接回车用推荐值(已是私密最安全组合)。%s\n' "$C_B$C_CYAN" "$C_RESET"
 
   if [ -z "$REG_MODE" ]; then
-    printf '\n%s【选项 1/4】谁能注册账号%s\n' "$C_B$C_CYAN" "$C_RESET"
+    printf '\n%s【选项 1/5】谁能注册账号%s\n' "$C_B$C_CYAN" "$C_RESET"
     cat <<'EOF'
   [1] 需注册令牌(推荐)—— 只有拿到你发的令牌的人才能注册;首个注册者=管理员。
   [2] 完全开放 —— 任何人都能注册(风险极高,商用勿选)。
@@ -380,7 +425,7 @@ EOF
   fi
 
   if [ -z "$ENABLE_FEDERATION" ]; then
-    printf '\n%s【选项 2/4】联邦互通(与外部 Matrix 世界相连)%s\n' "$C_B$C_CYAN" "$C_RESET"
+    printf '\n%s【选项 2/5】联邦互通(与外部 Matrix 世界相连)%s\n' "$C_B$C_CYAN" "$C_RESET"
     cat <<'EOF'
   [N] 关闭(推荐)—— 孤岛,外人无法向你的成员发消息,攻击面最小,商密首选。
   [y] 开启 —— 可与 matrix.org 等互通,暴露面变大。
@@ -390,7 +435,7 @@ EOF
   fi
 
   if [ -z "$ENABLE_CALLS" ]; then
-    printf '\n%s【选项 3/4】语音/视频通话(Element Call)%s\n' "$C_B$C_CYAN" "$C_RESET"
+    printf '\n%s【选项 3/5】语音/视频通话(Element Call)%s\n' "$C_B$C_CYAN" "$C_RESET"
     cat <<'EOF'
   [n] 关闭(推荐先关)—— tuwunel 原生支持,但通话链路较新;先跑稳聊天+大文件。
   [Y] 开启 —— 额外装 LiveKit + lk-jwt,需再加 livekit. / matrix-rtc. 两条 DNS 和 7881/7882 端口。
@@ -399,16 +444,29 @@ EOF
     case "$REPLY" in y|Y) ENABLE_CALLS=1;; *) ENABLE_CALLS=0;; esac
   fi
 
+  if [ -z "$ENABLE_WEB" ]; then
+    printf '\n%s【选项 4/5】自家域名网页客户端(Element Web)%s\n' "$C_B$C_CYAN" "$C_RESET"
+    cat <<'EOF'
+  [Y] 开启(推荐)—— 在【你自己的域名】放一个网页版 Element:成员打开
+       https://你的域名 就能【直接注册、登录、聊天】,不用去 element.io、不用装 App。
+       锁定到你的服务器、可白标;放根域名不需再加 DNS。多占约 30MB 内存。
+  [n] 关闭 —— 成员只能用 Element X App 或 app.element.io 登录你的服务器。
+EOF
+    ask_opt "→ [Y/n,回车=$DEF_WEB]: " "$DEF_WEB"
+    case "$REPLY" in n|N) ENABLE_WEB=0;; *) ENABLE_WEB=1;; esac
+  fi
+
   if [ -z "$MAX_UPLOAD" ]; then
-    printf '\n%s【选项 4/4】单文件上限(发大文件/大图/长视频)%s\n' "$C_B$C_CYAN" "$C_RESET"
+    printf '\n%s【选项 5/5】单文件上限(发大文件/大图/长视频)%s\n' "$C_B$C_CYAN" "$C_RESET"
     echo "  设多大都行(如 4G / 10G);越大越占磁盘。回车=4G。"
     ask_opt "→ 单文件上限 [回车=$(human "${SAVED_BYTES:-4294967296}")]: " "${SAVED_BYTES:+$(human "$SAVED_BYTES")}"
     [ -z "$REPLY" ] && REPLY="4G"; MAX_UPLOAD="$REPLY"
   fi
 fi
-REG_MODE="${REG_MODE:-token}"; ENABLE_FEDERATION="${ENABLE_FEDERATION:-0}"; ENABLE_CALLS="${ENABLE_CALLS:-0}"
+REG_MODE="${REG_MODE:-token}"; ENABLE_FEDERATION="${ENABLE_FEDERATION:-0}"; ENABLE_CALLS="${ENABLE_CALLS:-0}"; ENABLE_WEB="${ENABLE_WEB:-1}"
 case "$ENABLE_FEDERATION" in 1) :;; *) ENABLE_FEDERATION=0;; esac
 case "$ENABLE_CALLS" in 1) :;; *) ENABLE_CALLS=0;; esac
+case "$ENABLE_WEB" in 0) :;; *) ENABLE_WEB=1;; esac
 case "$REG_MODE" in token|open) :;; *) REG_MODE=token;; esac
 if [ -n "$MAX_UPLOAD" ]; then MAX_UPLOAD_BYTES="$(to_bytes "$MAX_UPLOAD")"
 elif [ -n "$SAVED_BYTES" ]; then MAX_UPLOAD_BYTES="$SAVED_BYTES"
@@ -417,8 +475,8 @@ else MAX_UPLOAD_BYTES=4294967296; fi
 if [ "$ENABLE_CALLS" = "1" ]; then REQUIRED_HOSTS="$DOMAIN $M_HOST $LK_HOST $RTC_HOST"; PORT_LINE="80/tcp 443/tcp 443/udp 7881/tcp 7882/udp"
 else REQUIRED_HOSTS="$DOMAIN $M_HOST"; PORT_LINE="80/tcp 443/tcp 443/udp"; fi
 echo ""
-printf '  %s✔ 配置: 注册[%s] · 联邦[%s] · 通话[%s] · 大文件上限[%s]%s\n' "$C_GREEN" \
-  "$REG_MODE" "$([ "$ENABLE_FEDERATION" = 1 ] && echo 开 || echo 关)" "$([ "$ENABLE_CALLS" = 1 ] && echo 开 || echo 关)" "$(human "$MAX_UPLOAD_BYTES")" "$C_RESET"
+printf '  %s✔ 配置: 注册[%s] · 联邦[%s] · 通话[%s] · 网页客户端[%s] · 大文件上限[%s]%s\n' "$C_GREEN" \
+  "$REG_MODE" "$([ "$ENABLE_FEDERATION" = 1 ] && echo 开 || echo 关)" "$([ "$ENABLE_CALLS" = 1 ] && echo 开 || echo 关)" "$([ "$ENABLE_WEB" = 1 ] && echo 开 || echo 关)" "$(human "$MAX_UPLOAD_BYTES")" "$C_RESET"
 
 # ---- 向导:必须手动做的事 ----
 if has_tty && [ "$RECONFIG" -eq 0 ]; then
@@ -547,6 +605,7 @@ REG_TOKEN=$REG_TOKEN
 REG_MODE=$REG_MODE
 ENABLE_FEDERATION=$ENABLE_FEDERATION
 ENABLE_CALLS=$ENABLE_CALLS
+ENABLE_WEB=$ENABLE_WEB
 MAX_UPLOAD_BYTES=$MAX_UPLOAD_BYTES
 TUWUNEL_MEM=$TUWUNEL_MEM
 LIVEKIT_API_KEY=$LK_KEY
@@ -647,6 +706,22 @@ cat >> docker-compose.yml <<'EOF'
 EOF
 fi
 
+# 自托管网页客户端 Element Web(你的域名注册/登录)
+if [ "$ENABLE_WEB" = "1" ]; then
+cat >> docker-compose.yml <<'EOF'
+
+  element-web:
+    image: vectorim/element-web:latest
+    restart: unless-stopped
+    logging: *log
+    security_opt: ["no-new-privileges:true"]
+    volumes:
+      - ./element-config.json:/app/config.json:ro
+    mem_limit: 96m
+    networks: [internal]
+EOF
+fi
+
 cat >> docker-compose.yml <<'EOF'
 
   caddy:
@@ -674,6 +749,26 @@ else
   CLIENT_WK="{\"m.homeserver\":{\"base_url\":\"https://$M_HOST\"}}"
 fi
 
+# ---- Element Web 配置(锁定到本服务器)+ 根域名要不要挂网页客户端 ----
+if [ "$ENABLE_WEB" = "1" ]; then
+  cat > element-config.json <<EOF
+{
+  "default_server_config": {
+    "m.homeserver": { "base_url": "https://$M_HOST", "server_name": "$DOMAIN" }
+  },
+  "disable_custom_urls": true,
+  "disable_guests": true,
+  "brand": "$DOMAIN",
+  "default_country_code": "CN",
+  "show_labs_settings": false
+}
+EOF
+  ROOT_HANDLE="reverse_proxy element-web:80"
+else
+  rm -f element-config.json 2>/dev/null || true
+  ROOT_HANDLE="respond \"$DOMAIN — Matrix (tuwunel)\" 200"
+fi
+
 # ---- Caddyfile ----
 cat > Caddyfile <<EOF
 {
@@ -693,7 +788,7 @@ $DOMAIN {
 		respond \`$CLIENT_WK\` 200
 	}
 	handle {
-		respond "$DOMAIN — Matrix (tuwunel)" 200
+		$ROOT_HANDLE
 	}
 }
 
@@ -748,6 +843,8 @@ for i in $(seq 1 40); do
 done
 [ "$READY" -eq 1 ] || warn "还没就绪。常见:云安全组没放行 80/443,或 DNS 未全球生效;Caddy 会自动重试证书,无需重装。看日志: cd $INSTALL_DIR && docker compose logs --tail 40"
 
+[ "$ENABLE_WEB" = "1" ] && WEB_URL="https://$DOMAIN" || WEB_URL=""
+
 # ---- 自动创建管理员(首个账号=管理员)+ 写凭据(成功才写,作为"部署完成"标志)----
 ADMIN_USER="admin"; ADMIN_PASS=""; ADMIN_OK=0
 if [ -f CREDENTIALS.txt ]; then
@@ -767,7 +864,8 @@ cat > CREDENTIALS.txt <<EOF
 ==== tuwunel 部署凭据  $DOMAIN  $(date '+%F %T') ====
 安装目录:    $INSTALL_DIR
 引擎:        tuwunel (Rust, 内置 RocksDB, 免 Postgres)
-客户端登录:  Element X / app.element.io,服务器填 $DOMAIN
+$([ -n "$WEB_URL" ] && echo "网页注册/登录: $WEB_URL   (你的域名,浏览器直接注册,不用 element.io)")
+客户端登录:  也可用 Element X App / app.element.io,服务器填 $DOMAIN
 管理员账号:  $ADMIN_USER   (完整ID: @$ADMIN_USER:$DOMAIN)
 管理员密码:  $ADMIN_PASS
 注册令牌:    $REG_TOKEN
@@ -796,10 +894,11 @@ cat <<EOF
 
 ${C_GREEN}========================================================${C_RESET}
  ${C_B}${C_GREEN}🎉 tuwunel 部署完成!${C_RESET}  ${C_B}$DOMAIN${C_RESET}
- (注册[$REG_MODE] · 联邦[$([ "$ENABLE_FEDERATION" = 1 ] && echo 开 || echo 关)] · 通话[$([ "$ENABLE_CALLS" = 1 ] && echo 开 || echo 关)] · 大文件[$(human "$MAX_UPLOAD_BYTES")] · 引擎 tuwunel/Rust,免Postgres)
+ (注册[$REG_MODE] · 联邦[$([ "$ENABLE_FEDERATION" = 1 ] && echo 开 || echo 关)] · 通话[$([ "$ENABLE_CALLS" = 1 ] && echo 开 || echo 关)] · 网页客户端[$([ "$ENABLE_WEB" = 1 ] && echo 开 || echo 关)] · 大文件[$(human "$MAX_UPLOAD_BYTES")] · 引擎 tuwunel/Rust,免Postgres)
 
- 手机装 Element X,登录:
-   服务器:  ${C_B}$DOMAIN${C_RESET}
+ ${C_B}${C_YELLOW}成员注册 / 登录${C_RESET}$([ -n "$WEB_URL" ] && printf '\n   网页版(推荐):浏览器打开 %s%s%s 直接注册登录 —— 你自己的域名,不用去 element.io、不用装 App(手机浏览器也能用)。' "$C_B$C_GREEN" "$WEB_URL" "$C_RESET")
+   也可用 Element X App / app.element.io:服务器填 ${C_B}$DOMAIN${C_RESET}
+$([ "$REG_MODE" = "token" ] && echo "   (需注册令牌:令牌在 CREDENTIALS.txt;或直接 sudo tuwunel adduser 建好账号发给成员)")
 
  ${C_B}${C_YELLOW}管理员(已自动创建,不用你手动注册)${C_RESET}
 $ADMIN_INFO
