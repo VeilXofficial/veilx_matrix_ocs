@@ -107,8 +107,8 @@ sudo bash matrix.sh
 ```
 
 低能耗，高并发版本：
-```sudo apt-get update && sudo apt-get install -y wget && wget -O tuwunel.sh https://raw.githubusercontent.com/VeilXofficial/veilx_matrix_ocs/main/matrix-tuwunel-installer.sh && sudo bash tuwunel.sh
-```
+sudo apt-get update && sudo apt-get install -y wget && wget -O tuwunel.sh https://raw.githubusercontent.com/VeilXofficial/veilx_matrix_ocs/main/matrix-tuwunel-installer.sh && sudo bash tuwunel.sh
+
 
 > 📌 第一行是基础准备:刷新系统软件列表并装好下载工具(系统里已有就自动跳过,重复执行无害)。后面装 Docker、防火墙等所有系统准备,脚本会自己完成,不用你操心。
 
