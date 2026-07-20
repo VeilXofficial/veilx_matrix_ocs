@@ -5,6 +5,10 @@
 #        tuwunel v1.8.1+ 已实现 Synapse 管理 API,面板放 admin.你的域名,可图形化
 #        管理用户/房间/媒体/邀请码。tuwunel 全局自带 CORS(源码确认),故 Caddy 不再需
 #        要加 CORS(加了反而冲突)。Ketesa 亦为非 root(sws 用户/8080),已同样处理端口与权限。
+#        · 老服务器补装:`sudo tuwunel enable-admin` 或菜单第 4 项(只开后台,不动其它)。
+#        · "举报事件/被举报用户"两页:tuwunel 未实现该端点,Caddy 空桩返回空列表避免红报错
+#          (真举报以消息形式进 admin 房间,不进这两个 API)。
+#        · 上线前自动 `caddy validate`,语法错则跳过 caddy 重启,保住老配置不中断整站。
 #  t1.6: 修复网页客户端 502(第二处根因)—— element-web 以非 root nginx 运行,
 #        而配置文件因 umask 077 是 600(仅 root 可读),容器读不了 /app/config.json 而崩溃重启;
 #        改为 chmod 644(此文件是公开的客户端配置,无机密)。
@@ -868,16 +872,44 @@ $DOMAIN {
 	}
 }
 
-$M_HOST {
-	reverse_proxy tuwunel:8008
-}
 EOF
-# 管理后台 Ketesa(admin.域名 → ketesa:8080)。跨域由 tuwunel 全局 CorsLayer 处理,Caddy 不加 CORS。
+# matrix host 块:开了后台则加"举报页空桩"。tuwunel 未实现 event_reports/user_reports(会 404),
+# Ketesa 的"报告事件/被举报用户"两页会红报错;拦截这两个精确路径返回空列表(200)→ 页面显示干净的"暂无数据"。
+# 这两条路径不经过 tuwunel,故 CORS 由 Caddy 自补,且严格限定在 handle 内(不污染被代理路径的 tuwunel CORS)。
 if [ "$ENABLE_ADMIN" = "1" ]; then
 cat >> Caddyfile <<EOF
 
+$M_HOST {
+	@reportstub path /_synapse/admin/v1/event_reports /_synapse/admin/v1/user_reports
+	@opts method OPTIONS
+	@ev path /_synapse/admin/v1/event_reports
+	@ur path /_synapse/admin/v1/user_reports
+	handle @reportstub {
+		route {
+			header Access-Control-Allow-Origin "*"
+			header Access-Control-Allow-Methods "GET, OPTIONS"
+			header Access-Control-Allow-Headers "Authorization, Content-Type"
+			header Access-Control-Max-Age "86400"
+			header Content-Type "application/json"
+			respond @opts 204
+			respond @ev \`{"event_reports":[],"total":0}\` 200
+			respond @ur \`{"user_reports":[],"total":0}\` 200
+		}
+	}
+	handle {
+		reverse_proxy tuwunel:8008
+	}
+}
+
 $A_HOST {
 	reverse_proxy ketesa:8080
+}
+EOF
+else
+cat >> Caddyfile <<EOF
+
+$M_HOST {
+	reverse_proxy tuwunel:8008
 }
 EOF
 fi
@@ -911,13 +943,31 @@ else rm -f livekit.yaml 2>/dev/null || true; fi
 mkdir -p data/tuwunel
 docker compose config -q || die "compose 配置校验失败"
 
+# 预校验 Caddyfile:语法错会让 caddy 起不来 → 整站 502。用一次性 caddy 容器先校验;
+# 不通过则本次【不重启 caddy】(老配置继续跑,不中断),并提示用户。
+CADDY_OK=1
+if command -v docker >/dev/null 2>&1 && docker image inspect caddy:2 >/dev/null 2>&1; then
+  if docker run --rm -v "$PWD/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2 \
+       caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1; then
+    ok "Caddyfile 校验通过"
+  else
+    CADDY_OK=0
+    warn "Caddyfile 语法校验未通过!已跳过 caddy 重启以免整站中断。请把 $INSTALL_DIR/Caddyfile 发我排查。"
+  fi
+fi
+
 # ---------------------------------------------------------------------
 # 6. 启动 + 验收
 # ---------------------------------------------------------------------
 bold "6/6 启动(首次拉镜像需几分钟)"
 [ "$RECONFIG" -eq 0 ] && docker compose pull -q || true
+# up -d 不会因 Caddyfile(绑定挂载)内容变化而重启正在运行的 caddy,只创建新容器(如 ketesa)/启动停止的容器,故对运行中的站点安全。
 docker compose up -d --remove-orphans
-[ "$RECONFIG" -eq 1 ] && { docker compose restart tuwunel caddy >/dev/null 2>&1 || true; echo "已按新配置重启。"; }
+# 只有显式 restart caddy 才会让它重读 Caddyfile;Caddyfile 没过校验就跳过,保住老配置不中断。
+if [ "$RECONFIG" -eq 1 ]; then
+  if [ "$CADDY_OK" = "1" ]; then docker compose restart tuwunel caddy >/dev/null 2>&1 || true; echo "已按新配置重启。"
+  else docker compose restart tuwunel >/dev/null 2>&1 || true; warn "caddy 未重启,新 Caddyfile 暂未生效;修好后执行: cd $INSTALL_DIR && docker compose restart caddy"; fi
+fi
 
 echo "等待 tuwunel 就绪…"; READY=0
 for i in $(seq 1 40); do
