@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # =====================================================================
-#  Matrix 轻量一键安装脚本 · tuwunel 版(通用版 t1.7)
+#  Matrix 轻量一键安装脚本 · tuwunel 版(通用版 t1.8)
+#  t1.8: 新增【Element X 手机 App 自助注册】(默认开):开启 tuwunel 内置 OIDC(不用另装 MAS),
+#        Element X 就能在一个 App 内注册+登录。注册仍走 UIAA、强制邀请码,不绕过(官方确认);
+#        安全前提=本脚本不添加任何上游 IdP。老服务器补开:`sudo tuwunel enable-elementx`;
+#        关闭:`disable-elementx`(关后 Element X 仅能密码登录、注册改走网页/管理员建号)。
 #  t1.7: 新增【自托管 Web 管理后台 Ketesa】(synapse-admin 官方支持的成熟面板):
 #        tuwunel v1.8.1+ 已实现 Synapse 管理 API,面板放 admin.你的域名,可图形化
 #        管理用户/房间/媒体/邀请码。tuwunel 全局自带 CORS(源码确认),故 Caddy 不再需
@@ -52,8 +56,9 @@
 #      sudo tuwunel            # 打开中文管理菜单
 #      sudo tuwunel adduser    # 加成员(一条命令建号并设密码)
 #      sudo tuwunel update        # 从 GitHub 拉最新脚本并应用新功能(数据不动)
-#      sudo tuwunel enable-admin  # 【老服务器补装 Web 管理后台 Ketesa】(只开后台,不动其它)
-#      sudo tuwunel config        # 改配置    sudo tuwunel uninstall  # 卸载
+#      sudo tuwunel enable-admin    # 【老服务器补装 Web 管理后台 Ketesa】(只开后台,不动其它)
+#      sudo tuwunel enable-elementx # 【开 Element X 手机自助注册】(原生OIDC;disable-elementx 关)
+#      sudo tuwunel config          # 改配置    sudo tuwunel uninstall  # 卸载
 #   (curl|bash 管道模式想让菜单/adduser 可用,设 TUWUNEL_INSTALLER_URL=<上面URL> 让它自取副本)
 #
 #  前提: DNS A 记录已指向本服务器公网 IP:
@@ -199,6 +204,7 @@ menu_status() {
   echo "  域名: ${d:-未知}   注册: $(env_saved REG_MODE)   联邦: $([ "$(env_saved ENABLE_FEDERATION)" = "1" ] && echo 开 || echo 关)   通话: $([ "$(env_saved ENABLE_CALLS)" = "1" ] && echo 开 || echo 关)   网页: $([ "$(env_saved ENABLE_WEB)" = "1" ] && echo 开 || echo 关)   后台: $([ "$(env_saved ENABLE_ADMIN)" = "1" ] && echo 开 || echo 关)   大文件: $(human "$(env_saved MAX_UPLOAD_BYTES)")"
   [ "$(env_saved ENABLE_WEB)" = "1" ] && echo "  网页客户端: https://${d}(成员浏览器直接注册/登录)"
   [ "$(env_saved ENABLE_ADMIN)" = "1" ] && echo "  管理后台:  https://admin.${d}(管理员账号密码登录,图形化管理)"
+  echo "  手机App注册(Element X): $([ "$(env_saved ENABLE_ELEMENTX)" = "1" ] && echo "开(原生OIDC,注册仍需邀请码)" || echo "关(Element X 仅密码登录;注册走网页/管理员建号)")"
   echo "── 容器状态 ──"; docker compose ps 2>/dev/null || true
   echo "── 资源占用 ──"
   local pct; pct="$(df . 2>/dev/null | awk 'NR==2{gsub(/%/,"",$5);print $5}')"; pct="${pct:-0}"
@@ -323,6 +329,10 @@ if [ "${1:-}" = "config" ]; then RECONFIG=1; set --; fi
 # (只改后台一项,不动注册/联邦/大文件等,也不问向导;需先加好 admin.域名 的 DNS)
 if [ "${1:-}" = "enable-admin" ];  then ENABLE_ADMIN=1; RECONFIG=1; set --; fi
 if [ "${1:-}" = "disable-admin" ]; then ENABLE_ADMIN=0; RECONFIG=1; set --; fi
+# 子命令: enable-elementx / disable-elementx —— 开/关 Element X 手机App自助注册(tuwunel 原生 OIDC)
+# 开:仍强制邀请码(不绕过);关:Element X 只能用密码登录、注册改走网页或管理员建号。
+if [ "${1:-}" = "enable-elementx" ];  then ENABLE_ELEMENTX=1; RECONFIG=1; set --; fi
+if [ "${1:-}" = "disable-elementx" ]; then ENABLE_ELEMENTX=0; RECONFIG=1; set --; fi
 
 # ---------------------------------------------------------------------
 # 0. 基础 / 已部署检测 → 管理菜单
@@ -419,12 +429,13 @@ bold "目标: $DOMAIN  →  服务器 ${PUBLIC_IP:-未知}  →  目录 $INSTALL
 # ---------------------------------------------------------------------
 # 选项(回车=推荐默认;重跑沿用;环境变量可预设)
 # ---------------------------------------------------------------------
-EXPLICIT=0; [ -n "${REG_MODE:-}${ENABLE_FEDERATION:-}${ENABLE_CALLS:-}${ENABLE_WEB:-}${ENABLE_ADMIN:-}${MAX_UPLOAD:-}" ] && EXPLICIT=1
+EXPLICIT=0; [ -n "${REG_MODE:-}${ENABLE_FEDERATION:-}${ENABLE_CALLS:-}${ENABLE_WEB:-}${ENABLE_ADMIN:-}${ENABLE_ELEMENTX:-}${MAX_UPLOAD:-}" ] && EXPLICIT=1
 REG_MODE="${REG_MODE:-$(env_saved REG_MODE)}"
 ENABLE_FEDERATION="${ENABLE_FEDERATION:-$(env_saved ENABLE_FEDERATION)}"
 ENABLE_CALLS="${ENABLE_CALLS:-$(env_saved ENABLE_CALLS)}"
 ENABLE_WEB="${ENABLE_WEB:-$(env_saved ENABLE_WEB)}"   # 自托管 Element Web 网页客户端(你的域名注册/登录)
 ENABLE_ADMIN="${ENABLE_ADMIN:-$(env_saved ENABLE_ADMIN)}"   # 自托管 Ketesa Web 管理后台(admin.你的域名)
+ENABLE_ELEMENTX="${ENABLE_ELEMENTX:-$(env_saved ENABLE_ELEMENTX)}"   # Element X 手机App自助注册(tuwunel原生OIDC;默认开)
 MAX_UPLOAD="${MAX_UPLOAD:-}"
 SAVED_BYTES="$(env_saved MAX_UPLOAD_BYTES)"
 
@@ -510,6 +521,7 @@ case "$ENABLE_FEDERATION" in 1) :;; *) ENABLE_FEDERATION=0;; esac
 case "$ENABLE_CALLS" in 1) :;; *) ENABLE_CALLS=0;; esac
 case "$ENABLE_WEB" in 0) :;; *) ENABLE_WEB=1;; esac
 case "$ENABLE_ADMIN" in 0) :;; *) ENABLE_ADMIN=1;; esac
+case "$ENABLE_ELEMENTX" in 0) :;; *) ENABLE_ELEMENTX=1;; esac
 case "$REG_MODE" in token|open) :;; *) REG_MODE=token;; esac
 if [ -n "$MAX_UPLOAD" ]; then MAX_UPLOAD_BYTES="$(to_bytes "$MAX_UPLOAD")"
 elif [ -n "$SAVED_BYTES" ]; then MAX_UPLOAD_BYTES="$SAVED_BYTES"
@@ -519,8 +531,8 @@ REQUIRED_HOSTS="$DOMAIN $M_HOST"; PORT_LINE="80/tcp 443/tcp 443/udp"
 [ "$ENABLE_ADMIN" = "1" ] && REQUIRED_HOSTS="$REQUIRED_HOSTS $A_HOST"
 if [ "$ENABLE_CALLS" = "1" ]; then REQUIRED_HOSTS="$REQUIRED_HOSTS $LK_HOST $RTC_HOST"; PORT_LINE="80/tcp 443/tcp 443/udp 7881/tcp 7882/udp"; fi
 echo ""
-printf '  %s✔ 配置: 注册[%s] · 联邦[%s] · 通话[%s] · 网页客户端[%s] · 管理后台[%s] · 大文件上限[%s]%s\n' "$C_GREEN" \
-  "$REG_MODE" "$([ "$ENABLE_FEDERATION" = 1 ] && echo 开 || echo 关)" "$([ "$ENABLE_CALLS" = 1 ] && echo 开 || echo 关)" "$([ "$ENABLE_WEB" = 1 ] && echo 开 || echo 关)" "$([ "$ENABLE_ADMIN" = 1 ] && echo 开 || echo 关)" "$(human "$MAX_UPLOAD_BYTES")" "$C_RESET"
+printf '  %s✔ 配置: 注册[%s] · 联邦[%s] · 通话[%s] · 网页客户端[%s] · 管理后台[%s] · 手机App注册[%s] · 大文件上限[%s]%s\n' "$C_GREEN" \
+  "$REG_MODE" "$([ "$ENABLE_FEDERATION" = 1 ] && echo 开 || echo 关)" "$([ "$ENABLE_CALLS" = 1 ] && echo 开 || echo 关)" "$([ "$ENABLE_WEB" = 1 ] && echo 开 || echo 关)" "$([ "$ENABLE_ADMIN" = 1 ] && echo 开 || echo 关)" "$([ "$ENABLE_ELEMENTX" = 1 ] && echo 开 || echo 关)" "$(human "$MAX_UPLOAD_BYTES")" "$C_RESET"
 
 # ---- 向导:必须手动做的事 ----
 if has_tty && [ "$RECONFIG" -eq 0 ]; then
@@ -653,6 +665,7 @@ ENABLE_FEDERATION=$ENABLE_FEDERATION
 ENABLE_CALLS=$ENABLE_CALLS
 ENABLE_WEB=$ENABLE_WEB
 ENABLE_ADMIN=$ENABLE_ADMIN
+ENABLE_ELEMENTX=$ENABLE_ELEMENTX
 MAX_UPLOAD_BYTES=$MAX_UPLOAD_BYTES
 TUWUNEL_MEM=$TUWUNEL_MEM
 LIVEKIT_API_KEY=$LK_KEY
@@ -669,6 +682,10 @@ registration_token = \"$REG_TOKEN\""; fi
 if [ "$ENABLE_FEDERATION" = "1" ]; then FED_LINE="allow_federation = true"; TRUST_LINE="trusted_servers = [\"matrix.org\"]"
 else FED_LINE="allow_federation = false"; TRUST_LINE="trusted_servers = []"; fi
 if [ "$ENABLE_CALLS" = "1" ]; then WK_LIVEKIT="livekit_url = \"https://$RTC_HOST\""; else WK_LIVEKIT="# livekit_url = \"\"  # 通话关闭"; fi
+# Element X 手机 App 自助注册:开启 tuwunel 内置 OIDC(不需另装 MAS)。注册仍走 UIAA、强制邀请码,不绕过。
+# 安全前提:本脚本【不添加任何 [[global.identity_provider]] 上游 IdP】(那才会绕过邀请码),故开着也守得住邀请制。
+if [ "$ENABLE_ELEMENTX" = "1" ]; then OIDC_LINE="oidc_native_auth = true          # 让 Element X 手机App能自助注册/登录(原生OIDC;注册仍强制邀请码)"
+else OIDC_LINE="# oidc_native_auth = false        # Element X 手机注册关闭(成员改用网页注册/管理员建号;Element X 仍可用密码登录)"; fi
 
 cat > tuwunel.toml <<EOF
 # ===== $MARKER($(date +%F))=====
@@ -683,6 +700,7 @@ grant_admin_to_first_user = true # 第一个注册的人=服务器管理员
 create_admin_room = true
 new_user_displayname_suffix = "" # 去掉默认昵称后缀
 allow_public_room_directory_over_federation = false
+$OIDC_LINE
 $FED_LINE
 $TRUST_LINE
 $REG_LINES
@@ -1031,11 +1049,11 @@ cat <<EOF
 
 ${C_GREEN}========================================================${C_RESET}
  ${C_B}${C_GREEN}🎉 tuwunel 部署完成!${C_RESET}  ${C_B}$DOMAIN${C_RESET}
- (注册[$REG_MODE] · 联邦[$([ "$ENABLE_FEDERATION" = 1 ] && echo 开 || echo 关)] · 通话[$([ "$ENABLE_CALLS" = 1 ] && echo 开 || echo 关)] · 网页客户端[$([ "$ENABLE_WEB" = 1 ] && echo 开 || echo 关)] · 管理后台[$([ "$ENABLE_ADMIN" = 1 ] && echo 开 || echo 关)] · 大文件[$(human "$MAX_UPLOAD_BYTES")] · 引擎 tuwunel/Rust,免Postgres)
+ (注册[$REG_MODE] · 联邦[$([ "$ENABLE_FEDERATION" = 1 ] && echo 开 || echo 关)] · 通话[$([ "$ENABLE_CALLS" = 1 ] && echo 开 || echo 关)] · 网页客户端[$([ "$ENABLE_WEB" = 1 ] && echo 开 || echo 关)] · 管理后台[$([ "$ENABLE_ADMIN" = 1 ] && echo 开 || echo 关)] · 手机App注册[$([ "$ENABLE_ELEMENTX" = 1 ] && echo 开 || echo 关)] · 大文件[$(human "$MAX_UPLOAD_BYTES")] · 引擎 tuwunel/Rust,免Postgres)
 
  ${C_B}${C_YELLOW}成员注册 / 登录${C_RESET}$([ -n "$WEB_URL" ] && printf '\n   网页版(推荐):浏览器打开 %s%s%s 直接注册登录 —— 你自己的域名,不用去 element.io、不用装 App(手机浏览器也能用)。' "$C_B$C_GREEN" "$WEB_URL" "$C_RESET")
-   也可用 Element X App / app.element.io:服务器填 ${C_B}$DOMAIN${C_RESET}
-$([ "$REG_MODE" = "token" ] && echo "   (需注册令牌:令牌在 CREDENTIALS.txt;或直接 sudo tuwunel adduser 建好账号发给成员)")
+   手机 App:装 ${C_B}Element X${C_RESET}(应用商店)→ 服务器地址填 ${C_B}$DOMAIN${C_RESET} → $([ "$ENABLE_ELEMENTX" = 1 ] && echo "可【直接注册】(需邀请码)或登录 —— 已开启原生 OIDC" || echo "用【用户名+密码登录】(Element X 不支持注册;账号请走网页或下面的 adduser)")
+$([ "$REG_MODE" = "token" ] && echo "   (邀请码在 CREDENTIALS.txt;或直接 sudo tuwunel adduser 建好账号发给成员,成员用 Element X 密码登录)")
 
  ${C_B}${C_YELLOW}管理员(已自动创建,不用你手动注册)${C_RESET}
 $ADMIN_INFO
