@@ -959,6 +959,13 @@ chmod 600 livekit.yaml
 else rm -f livekit.yaml 2>/dev/null || true; fi
 
 mkdir -p data/tuwunel
+# 清理历史遗留的手动 override:早期修 502 时手工建的 docker-compose.override.yml(只给 element-web 设了
+# ELEMENT_WEB_PORT、无 image)。脚本已内置该修复;若网页客户端关闭,主 compose 无 element-web,残留
+# override 会变成"无 image 的服务"导致校验失败。识别到就备份移除。
+if [ -f docker-compose.override.yml ] && grep -qE 'ELEMENT_WEB_PORT|element-web' docker-compose.override.yml 2>/dev/null; then
+  mv -f docker-compose.override.yml "docker-compose.override.yml.obsolete-$(date +%s)" 2>/dev/null || rm -f docker-compose.override.yml
+  warn "已移除历史遗留的 docker-compose.override.yml(早期手动 502 补丁,脚本已内置,留着会冲突)。"
+fi
 docker compose config -q || die "compose 配置校验失败"
 
 # 预校验 Caddyfile:语法错会让 caddy 起不来 → 整站 502。用一次性 caddy 容器先校验;
