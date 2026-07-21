@@ -108,6 +108,7 @@ sudo bash matrix.sh
 
 tuwunel版：
 本版基于 **tuwunel**（Rust 引擎，内置数据库、**免 PostgreSQL**）：更省资源、更稳、**能像 Telegram 一样发大文件/大图/长视频**，2GB
+**强烈推荐部署此版本，此版本支持元数据定期销毁，支持CDN，支持管理后台，支持盾机（开发中）**
 
 ```bash
 sudo apt-get update && sudo apt-get install -y wget && wget -O tuwunel.sh https://raw.githubusercontent.com/VeilXofficial/veilx_matrix_ocs/main/matrix-tuwunel-installer.sh && sudo bash tuwunel.sh
