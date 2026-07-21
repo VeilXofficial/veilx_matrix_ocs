@@ -1,6 +1,18 @@
 #!/usr/bin/env bash
 # =====================================================================
-#  Matrix 轻量一键安装脚本 · tuwunel 版(通用版 t1.8)
+#  Matrix 轻量一键安装脚本 · tuwunel 版(通用版 t1.11)
+#  t1.11: 新增【可选·自动定时加密备份】(默认关):`sudo tuwunel autobackup` 开启后,cron
+#         每周(或每天)自动做 AES-256 加密备份、自动轮转(留最近 N 个)、满盘自动跳过;
+#         密钥存 .backup-key(仅 root),开启时醒目提示务必抄走(否则备份永久打不开)。
+#  t1.10:【抗取证/机密最小化】(1) 修复关键缺口:强制新房间默认 E2EE
+#        (encryption_enabled_by_default_for_room_type="all";此前不写=客户端没主动加密时消息明文入库);
+#        (2) 备份改【AES-256 加密】(可选口令;此前裸 tar.gz 含明文密码是最糟暴露面);
+#        (3) 新增 `sudo tuwunel forget-secrets`(菜单 s):涂销磁盘上的明文管理员密码/邀请码 + fstrim。
+#  t1.9: 新增【隐私加固 / 元数据最小化】(默认开,PRIVACY=0 可关):真实客户端 IP 不入库
+#        (ip_source=connect_info,tuwunel 建设备时无开关可关地记 IP,这是唯一缓解);
+#        修复两个危险默认:撤回消息原文默认再留 60 天、管理房留操作流水;关在线状态/输入提示;
+#        收紧资料与房间目录暴露面。新增 `sudo tuwunel privacy`(菜单 p):看【删不掉什么】、
+#        查加固状态、清容器日志。配置改动带自动回滚(键不被本版接受则还原,不会把服务搞挂)。
 #  t1.8: 新增【Element X 手机 App 自助注册】(默认开):开启 tuwunel 内置 OIDC(不用另装 MAS),
 #        Element X 就能在一个 App 内注册+登录。注册仍走 UIAA、强制邀请码,不绕过(官方确认);
 #        安全前提=本脚本不添加任何上游 IdP。老服务器补开:`sudo tuwunel enable-elementx`;
@@ -58,6 +70,9 @@
 #      sudo tuwunel update        # 从 GitHub 拉最新脚本并应用新功能(数据不动)
 #      sudo tuwunel enable-admin    # 【老服务器补装 Web 管理后台 Ketesa】(只开后台,不动其它)
 #      sudo tuwunel enable-elementx # 【开 Element X 手机自助注册】(原生OIDC;disable-elementx 关)
+#      sudo tuwunel privacy        # 隐私/元数据:看能删什么、查加固状态、清日志
+#      sudo tuwunel forget-secrets  # 抗取证:涂销磁盘上的明文密码/邀请码
+#      sudo tuwunel autobackup     # 可选:开启每周自动加密备份(含轮转/满盘跳过)
 #      sudo tuwunel config          # 改配置    sudo tuwunel uninstall  # 卸载
 #   (curl|bash 管道模式想让菜单/adduser 可用,设 TUWUNEL_INSTALLER_URL=<上面URL> 让它自取副本)
 #
@@ -204,6 +219,7 @@ menu_status() {
   echo "  域名: ${d:-未知}   注册: $(env_saved REG_MODE)   联邦: $([ "$(env_saved ENABLE_FEDERATION)" = "1" ] && echo 开 || echo 关)   通话: $([ "$(env_saved ENABLE_CALLS)" = "1" ] && echo 开 || echo 关)   网页: $([ "$(env_saved ENABLE_WEB)" = "1" ] && echo 开 || echo 关)   后台: $([ "$(env_saved ENABLE_ADMIN)" = "1" ] && echo 开 || echo 关)   大文件: $(human "$(env_saved MAX_UPLOAD_BYTES)")"
   [ "$(env_saved ENABLE_WEB)" = "1" ] && echo "  网页客户端: https://${d}(成员浏览器直接注册/登录)"
   [ "$(env_saved ENABLE_ADMIN)" = "1" ] && echo "  管理后台:  https://admin.${d}(管理员账号密码登录,图形化管理)"
+  [ -f /etc/cron.d/tuwunel-backup ] && echo "  自动备份:  已开启($(grep -oE '#.*' /etc/cron.d/tuwunel-backup 2>/dev/null))" || echo "  自动备份:  未开启(sudo tuwunel autobackup 可开)"
   echo "  手机App注册(Element X): $([ "$(env_saved ENABLE_ELEMENTX)" = "1" ] && echo "开(原生OIDC,注册仍需邀请码)" || echo "关(Element X 仅密码登录;注册走网页/管理员建号)")"
   echo "── 容器状态 ──"; docker compose ps 2>/dev/null || true
   echo "── 资源占用 ──"
@@ -218,16 +234,186 @@ menu_status() {
   else warn "matrix.${d} 暂不可访问 —— 排查: docker compose logs --tail 30"; fi
   echo "  凭据: $INSTALL_DIR/CREDENTIALS.txt"
 }
+menu_privacy() {
+  cd "$INSTALL_DIR" 2>/dev/null || { warn "未找到部署目录"; return; }
+  cat <<'EOF'
+
+── 隐私 / 元数据:先说【删不掉的】(不给你假安全感)──
+  端到端加密保护的是"内容";下面这些是服务器运行必须的结构性元数据,删了就无法工作:
+    · 房间成员关系(谁在哪个房间、谁邀请谁)—— 清历史也会保留状态事件
+    · 事件图与时间戳(每条消息的 id/前后关系/发送时刻)
+    · 设备清单与 E2EE 密钥的上传时序
+    · 账号存在性、创建时间、昵称/头像
+  服务器管不到的地方:成员手机/电脑上的本地副本、推送经过的苹果/谷歌服务器、
+  以及你自己的备份包(备份里含有你刚清掉的数据)。
+  ⚠️ tuwunel 没有"消息定时自动销毁"功能(未实现 MSC1763),别对外承诺服务器会自动销毁消息。
+EOF
+  echo ""
+  echo "── 当前加固状态(读 tuwunel.toml)──"
+  _pk(){ if grep -qE "^$1[[:space:]]*=" tuwunel.toml 2>/dev/null; then echo "  ✔ $2"; else echo "  ✘ $2 (未启用)"; fi; }
+  _pk ip_source                 "真实客户端 IP 不入库(ip_source=connect_info)"
+  _pk save_unredacted_events    "撤回即真删(不再保留 60 天原文)"
+  _pk allow_local_presence      "不记录在线状态"
+  _pk require_auth_for_profile_requests "资料需鉴权"
+  _pk admin_room_notices        "管理房不留操作流水"
+  echo "  (未启用? 执行: PRIVACY=1 sudo -E tuwunel config)"
+  echo ""
+  echo "── 可清理的:容器日志(可能含少量 IP/请求痕迹)──"
+  local tot=0 pth
+  for c in $(docker compose ps -q 2>/dev/null); do
+    pth="$(docker inspect --format='{{.LogPath}}' "$c" 2>/dev/null)"
+    [ -n "$pth" ] && [ -f "$pth" ] && tot=$((tot + $(stat -c%s "$pth" 2>/dev/null || echo 0)))
+  done
+  echo "  当前容器日志合计: $(( tot / 1024 )) KB"
+  printf "  清空全部容器日志? [y/N]: "
+  local R=""; if [ -t 0 ]; then read -r R || R=""; else read -r R < /dev/tty 2>/dev/null || R=""; fi
+  case "$R" in
+    y|Y)
+      for c in $(docker compose ps -q 2>/dev/null); do
+        pth="$(docker inspect --format='{{.LogPath}}' "$c" 2>/dev/null)"
+        [ -n "$pth" ] && [ -f "$pth" ] && truncate -s 0 "$pth" 2>/dev/null || true
+      done
+      ok "容器日志已清空。" ;;
+    *) echo "  已跳过。" ;;
+  esac
+  echo ""
+  echo "  提示:RocksDB 的删除是「墓碑式」,空间与残留字节要等压缩(compaction)后才真正回收。"
+  echo "  彻底销毁数据的唯一可靠方式:销毁/重装服务器磁盘,并处理好备份包。"
+}
+
+menu_forget_secrets() {
+  cd "$INSTALL_DIR" 2>/dev/null || { warn "未找到部署目录"; return; }
+  if [ ! -f CREDENTIALS.txt ]; then ok "CREDENTIALS.txt 不存在(可能已涂销)。"; else
+    if grep -q '安全销毁' CREDENTIALS.txt 2>/dev/null; then ok "凭据文件已涂销过,无明文密码/令牌。"; else
+      echo "CREDENTIALS.txt 里有【明文管理员密码 + 邀请码】,运行时无用(密码已哈希入库,仅显示用),"
+      echo "却是磁盘镜像后被取证\"一击拿走\"的最高价值目标。此操作会把这两行涂掉,文件保留(作部署标记)。"
+      echo "务必先把管理员密码/邀请码抄进密码管理器!"
+      printf "确认涂销? 输入 yes: "; local R=""; if [ -t 0 ]; then read -r R || R=""; else read -r R < /dev/tty 2>/dev/null || R=""; fi
+      if [ "$R" = "yes" ]; then
+        umask 077
+        sed -E 's/^(管理员密码:).*/\1  (已安全销毁 —— 见密码管理器)/; s/^(注册令牌:).*/\1    (已安全销毁 —— 见密码管理器)/' CREDENTIALS.txt > CREDENTIALS.txt.new 2>/dev/null \
+          && cat CREDENTIALS.txt.new > CREDENTIALS.txt && shred -u CREDENTIALS.txt.new 2>/dev/null
+        chmod 600 CREDENTIALS.txt 2>/dev/null || true
+        ok "已涂销 CREDENTIALS.txt 里的密码与邀请码。"
+      else echo "已取消。"; return; fi
+    fi
+  fi
+  # 邀请码仍在 tuwunel.toml(令牌注册开着就必须在);彻底移除需改用管理员建号
+  if grep -q '^registration_token' tuwunel.toml 2>/dev/null; then
+    echo ""
+    echo "提示:邀请码同样存在 tuwunel.toml(令牌注册开着时运行必需,无法移除)。"
+    echo "要把邀请码也从磁盘彻底拿掉 → 关闭自助注册、改由管理员建号:"
+    echo "   REG_MODE=admin_only 暂不支持;可执行  allow_registration 关闭后仅用 sudo tuwunel adduser 建号"
+  fi
+  echo ""; echo "==> 触发 fstrim(提示 SSD 回收已释放块;非保证擦除)…"
+  fstrim -av 2>/dev/null || fstrim / 2>/dev/null || warn "fstrim 不可用(虚拟盘可能不支持)"
+  echo "  注:SSD/VPS 上删除不保证物理擦除;彻底销毁只能靠 LUKS 加密擦除或销毁磁盘。"
+}
+
+# ---- 自动定时加密备份(可选;配置编进 cron 行,不污染 .env)----
+backup_run() {   # 非交互,供 cron 调用;密钥读 .backup-key,目录/保留数从环境变量取
+  cd "$INSTALL_DIR" 2>/dev/null || return 1
+  local keyf dir keep ts f raw free log
+  log="$INSTALL_DIR/backup.log"; keyf="$INSTALL_DIR/.backup-key"
+  [ -f "$keyf" ] || { echo "[$(date '+%F %T')] 无备份密钥(.backup-key),跳过。" >> "$log"; return 1; }
+  dir="${BACKUP_DIR:-$INSTALL_DIR/backups}"; keep="${BACKUP_KEEP:-2}"
+  mkdir -p "$dir" 2>/dev/null; chmod 700 "$dir" 2>/dev/null || true
+  raw="$(du -sk data/tuwunel 2>/dev/null | cut -f1)"; raw="${raw:-0}"
+  free="$(df -Pk "$dir" 2>/dev/null | awk 'NR==2{print $4}')"; free="${free:-0}"
+  if [ "$free" -lt "$raw" ] 2>/dev/null; then
+    echo "[$(date '+%F %T')] 跳过备份:剩余空间不足(需≈${raw}K,剩${free}K),避免撑爆盘。请清理/调低保留数/改存外部盘。" >> "$log"; return 1
+  fi
+  ts="$(date +%F-%H%M%S)"; f="$dir/tuwunel-backup-$ts.tar.gz.enc"
+  docker compose stop tuwunel >/dev/null 2>&1 || true
+  ( umask 077; tar czf - .env tuwunel.toml data/tuwunel 2>/dev/null \
+      | BKPW="$(cat "$keyf")" openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -pass env:BKPW -out "$f" 2>/dev/null ) || true
+  docker compose start tuwunel >/dev/null 2>&1 || docker compose up -d >/dev/null 2>&1 || true
+  chmod 600 "$f" 2>/dev/null || true
+  if [ -s "$f" ]; then
+    echo "[$(date '+%F %T')] 备份完成: $f ($(du -h "$f" 2>/dev/null | cut -f1))" >> "$log"
+    ls -1t "$dir"/tuwunel-backup-*.tar.gz.enc 2>/dev/null | tail -n +$((keep+1)) | while read -r old; do rm -f "$old"; done
+  else
+    rm -f "$f" 2>/dev/null; echo "[$(date '+%F %T')] 备份失败(空文件)。" >> "$log"
+  fi
+  tail -n 200 "$log" > "$log.tmp" 2>/dev/null && mv -f "$log.tmp" "$log" 2>/dev/null || true
+}
+
+menu_autobackup() {
+  cd "$INSTALL_DIR" 2>/dev/null || { warn "未找到部署目录"; return; }
+  local keyf cronf dir keep freq cronline self C R
+  keyf="$INSTALL_DIR/.backup-key"; cronf="/etc/cron.d/tuwunel-backup"
+  self="${SELF_BIN:-$INSTALL_DIR/tuwunel-installer.sh}"
+  echo ""; echo "── 自动定时加密备份 ──"
+  if [ -f "$cronf" ]; then ok "当前:已开启"; grep -oE '#.*' "$cronf" 2>/dev/null | sed 's/^/     /'
+  else echo "  当前:未开启"; fi
+  echo "  1) 开启 / 重设    2) 关闭    3) 立即备份一次    0) 返回"
+  C=""; if [ -t 0 ]; then read -rp "  选择: " C || C=""; else read -rp "  选择: " C < /dev/tty 2>/dev/null || C=""; fi
+  case "$C" in
+    2) rm -f "$cronf" 2>/dev/null; ok "已关闭自动备份(已生成的备份文件保留)。"; return ;;
+    3) [ -f "$cronf" ] || { warn "尚未开启,无法立即备份。先选 1 开启。"; return; }
+       echo "  正在备份(会短暂停一下 tuwunel)…"
+       BACKUP_DIR="$(grep -oE 'BACKUP_DIR=[^ ]+' "$cronf" | cut -d= -f2)" BACKUP_KEEP="$(grep -oE 'BACKUP_KEEP=[^ ]+' "$cronf" | cut -d= -f2)" backup_run
+       tail -n1 "$INSTALL_DIR/backup.log" 2>/dev/null; return ;;
+    1) : ;;
+    *) return ;;
+  esac
+  printf "  备份存放目录 [回车=%s/backups;可填挂载的外部盘/对象存储路径]: " "$INSTALL_DIR"
+  if [ -t 0 ]; then read -r dir || dir=""; else read -r dir < /dev/tty 2>/dev/null || dir=""; fi
+  dir="${dir:-$INSTALL_DIR/backups}"
+  printf "  保留最近几个 [回车=2]: "; if [ -t 0 ]; then read -r keep || keep=""; else read -r keep < /dev/tty 2>/dev/null || keep=""; fi
+  echo "$keep" | grep -qE '^[0-9]+$' || keep=2
+  printf "  频率 [1=每周(推荐) 2=每天,回车=1]: "; if [ -t 0 ]; then read -r freq || freq=""; else read -r freq < /dev/tty 2>/dev/null || freq=""; fi
+  case "$freq" in 2) cronline="0 4 * * *"; freq="每天04:00";; *) cronline="0 4 * * 0"; freq="每周日04:00";; esac
+  mkdir -p "$dir" 2>/dev/null; chmod 700 "$dir" 2>/dev/null || true
+  [ -f "$keyf" ] || { ( umask 077; openssl rand -hex 32 > "$keyf" ); chmod 600 "$keyf"; }
+  printf '%s root INSTALL_DIR=%s BACKUP_DIR=%s BACKUP_KEEP=%s bash %s backup-run >/dev/null 2>&1  #%s 保留%s个 存 %s\n' \
+    "$cronline" "$INSTALL_DIR" "$dir" "$keep" "$self" "$freq" "$keep" "$dir" > "$cronf"
+  chmod 644 "$cronf" 2>/dev/null || true
+  ok "已开启:$freq 自动加密备份 → $dir(保留最近 $keep 个,满盘自动跳过)。"
+  echo ""
+  printf '  %s%s⚠️ 极重要:下面是备份加密密钥,现在就抄进密码管理器!%s\n' "$C_B" "$C_YELLOW" "$C_RESET"
+  echo "  ──────────────────────────────────────────────"
+  echo "    $(cat "$keyf")"
+  echo "  ──────────────────────────────────────────────"
+  echo "  · 没有这把密钥,任何备份都【永久打不开】。它现在只存在这台服务器上——"
+  echo "    服务器要是没了、你又没抄下,备份全废。务必现在存到别处。"
+  echo "  · 本机 backups 目录会随服务器一起消失。请把 .enc 定期复制到别处:"
+  echo "      scp root@服务器IP:$dir/'*.enc' ~/     (或把目录设成挂载的外部盘/对象存储)"
+  echo "  · 恢复解密: openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass pass:密钥 -in 备份.enc | tar xzf - -C 目标目录"
+  echo ""
+  printf "  现在立即跑一次备份验证? [Y/n]: "; R=""; if [ -t 0 ]; then read -r R || R=""; else read -r R < /dev/tty 2>/dev/null || R=""; fi
+  case "$R" in n|N) : ;; *) echo "  备份中(会短暂停一下 tuwunel)…"; BACKUP_DIR="$dir" BACKUP_KEEP="$keep" backup_run; tail -n1 "$INSTALL_DIR/backup.log" 2>/dev/null ;; esac
+}
+
 menu_backup() {
-  cd "$INSTALL_DIR"; local ts f; ts="$(date +%F-%H%M%S)"; f="$INSTALL_DIR/tuwunel-backup-$ts.tar.gz"
+  cd "$INSTALL_DIR"; local ts f pw pw2; ts="$(date +%F-%H%M%S)"; f="$INSTALL_DIR/tuwunel-backup-$ts.tar.gz"
   umask 077
+  echo "备份含【明文机密】(邀请码、配置、整个数据库、全部媒体)。强烈建议加密后再存/传。"
+  echo "设一个加密口令(AES-256)。留空=不加密(风险自负)。"
+  printf "  加密口令: "; pw=""; if [ -t 0 ]; then read -rs pw || pw=""; else read -rs pw < /dev/tty 2>/dev/null || pw=""; fi; echo
+  if [ -n "$pw" ]; then
+    printf "  再输一次: "; pw2=""; if [ -t 0 ]; then read -rs pw2 || pw2=""; else read -rs pw2 < /dev/tty 2>/dev/null || pw2=""; fi; echo
+    [ "$pw" = "$pw2" ] || { warn "两次口令不一致,已取消。"; return; }
+    f="$f.enc"
+  else
+    warn "未加密!备份里有明文管理员密码/邀请码,切勿传到不可信位置。"
+  fi
   echo "==> 停止服务以一致地备份 RocksDB(库不停止直接打包可能损坏)…"
   docker compose stop tuwunel >/dev/null 2>&1 || true
-  echo "==> 打包 配置 + 数据库 + 媒体(媒体大时压缩包会很大)…"
-  tar czf "$f" .env CREDENTIALS.txt tuwunel.toml data/tuwunel 2>/dev/null || true
+  if [ -n "$pw" ]; then
+    # 口令走环境变量(不进 argv/ps),openssl 从 stdin 读 tar 流并加密
+    tar czf - .env CREDENTIALS.txt tuwunel.toml data/tuwunel 2>/dev/null \
+      | BKPW="$pw" openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -pass env:BKPW -out "$f" 2>/dev/null || true
+  else
+    tar czf "$f" .env CREDENTIALS.txt tuwunel.toml data/tuwunel 2>/dev/null || true
+  fi
   docker compose start tuwunel >/dev/null 2>&1 || docker compose up -d >/dev/null 2>&1 || true
   chmod 600 "$f" 2>/dev/null || true
   if [ -s "$f" ]; then ok "备份完成: $f($(du -h "$f" | cut -f1))"
+    if [ -n "$pw" ]; then
+      echo "  ⚠️ 口令丢了 = 备份永久打不开,请存进密码管理器。"
+      echo "  恢复解密: openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass pass:你的口令 -in \"$(basename "$f")\" | tar xzf - -C 目标目录"
+    fi
     echo "  下载到本机: scp root@服务器IP:$f ~/Desktop/"
   else warn "备份失败"; fi
 }
@@ -244,6 +430,8 @@ SELF_SRC=""; [ -f "${0:-}" ] && SELF_SRC="$(cd "$(dirname -- "$0")" && pwd)/$(ba
 # ---------------------------------------------------------------------
 if [ "${1:-}" = "diskguard" ]; then disk_guard; exit 0; fi
 if [ "${1:-}" = "cleanup" ]; then [ -d "$INSTALL_DIR" ] || die "找不到 $INSTALL_DIR"; menu_cleanup; exit 0; fi
+if [ "${1:-}" = "backup-run" ]; then INSTALL_DIR="${INSTALL_DIR:-/opt/tuwunel}"; backup_run; exit 0; fi
+if [ "${1:-}" = "autobackup" ]; then INSTALL_DIR="${INSTALL_DIR:-/opt/tuwunel}"; SELF_BIN="${SELF_BIN:-$INSTALL_DIR/tuwunel-installer.sh}"; menu_autobackup; exit 0; fi
 
 # 子命令: update —— 从 GitHub 拉最新脚本,替换本地副本+全局命令,再自动应用新功能(不动数据)
 if [ "${1:-}" = "update" ]; then
@@ -333,6 +521,9 @@ if [ "${1:-}" = "disable-admin" ]; then ENABLE_ADMIN=0; RECONFIG=1; set --; fi
 # 开:仍强制邀请码(不绕过);关:Element X 只能用密码登录、注册改走网页或管理员建号。
 if [ "${1:-}" = "enable-elementx" ];  then ENABLE_ELEMENTX=1; RECONFIG=1; set --; fi
 if [ "${1:-}" = "disable-elementx" ]; then ENABLE_ELEMENTX=0; RECONFIG=1; set --; fi
+# 子命令: privacy —— 隐私/元数据:看能删什么、当前加固状态、清容器日志
+if [ "${1:-}" = "privacy" ]; then INSTALL_DIR="${INSTALL_DIR:-/opt/tuwunel}"; menu_privacy; exit 0; fi
+if [ "${1:-}" = "forget-secrets" ]; then INSTALL_DIR="${INSTALL_DIR:-/opt/tuwunel}"; menu_forget_secrets; exit 0; fi
 
 # ---------------------------------------------------------------------
 # 0. 基础 / 已部署检测 → 管理菜单
@@ -365,6 +556,9 @@ if [ "$RECONFIG" -eq 0 ] && [ -f "$INSTALL_DIR/CREDENTIALS.txt" ] \
   8) 重启所有服务
   9) 更新脚本 + 应用新功能(从 GitHub 拉最新,数据不动)
  10) 彻底卸载
+  p) 隐私加固 / 元数据清理(看能删什么、清日志)
+  s) 涂销明文凭据文件(抗取证:去掉磁盘上的明文密码/邀请码)
+  b) 自动定时加密备份(可选:开启后每周自动,含轮转/满盘跳过)
   0) 退出
 EOF
       MCHOICE=""
@@ -389,6 +583,9 @@ EOF
            [ -d "$INSTALL_DIR" ] || exit 0 ;;
         10) [ -f "$SELF_BIN" ] && INSTALL_DIR="$INSTALL_DIR" bash "$SELF_BIN" uninstall || warn "缺少脚本副本"
            [ -d "$INSTALL_DIR" ] || exit 0 ;;
+        p|P) menu_privacy ;;
+        s|S) menu_forget_secrets ;;
+        b|B) menu_autobackup ;;
         0|q|Q) echo "再见。"; exit 0 ;;
         *) warn "无效选择,请输入 0-10" ;;
       esac
@@ -429,13 +626,14 @@ bold "目标: $DOMAIN  →  服务器 ${PUBLIC_IP:-未知}  →  目录 $INSTALL
 # ---------------------------------------------------------------------
 # 选项(回车=推荐默认;重跑沿用;环境变量可预设)
 # ---------------------------------------------------------------------
-EXPLICIT=0; [ -n "${REG_MODE:-}${ENABLE_FEDERATION:-}${ENABLE_CALLS:-}${ENABLE_WEB:-}${ENABLE_ADMIN:-}${ENABLE_ELEMENTX:-}${MAX_UPLOAD:-}" ] && EXPLICIT=1
+EXPLICIT=0; [ -n "${REG_MODE:-}${ENABLE_FEDERATION:-}${ENABLE_CALLS:-}${ENABLE_WEB:-}${ENABLE_ADMIN:-}${ENABLE_ELEMENTX:-}${ENABLE_PRIVACY:-}${PRIVACY:-}${MAX_UPLOAD:-}" ] && EXPLICIT=1
 REG_MODE="${REG_MODE:-$(env_saved REG_MODE)}"
 ENABLE_FEDERATION="${ENABLE_FEDERATION:-$(env_saved ENABLE_FEDERATION)}"
 ENABLE_CALLS="${ENABLE_CALLS:-$(env_saved ENABLE_CALLS)}"
 ENABLE_WEB="${ENABLE_WEB:-$(env_saved ENABLE_WEB)}"   # 自托管 Element Web 网页客户端(你的域名注册/登录)
 ENABLE_ADMIN="${ENABLE_ADMIN:-$(env_saved ENABLE_ADMIN)}"   # 自托管 Ketesa Web 管理后台(admin.你的域名)
 ENABLE_ELEMENTX="${ENABLE_ELEMENTX:-$(env_saved ENABLE_ELEMENTX)}"   # Element X 手机App自助注册(tuwunel原生OIDC;默认开)
+ENABLE_PRIVACY="${PRIVACY:-${ENABLE_PRIVACY:-$(env_saved ENABLE_PRIVACY)}}"   # 隐私加固/元数据最小化(默认开)
 MAX_UPLOAD="${MAX_UPLOAD:-}"
 SAVED_BYTES="$(env_saved MAX_UPLOAD_BYTES)"
 
@@ -522,6 +720,7 @@ case "$ENABLE_CALLS" in 1) :;; *) ENABLE_CALLS=0;; esac
 case "$ENABLE_WEB" in 0) :;; *) ENABLE_WEB=1;; esac
 case "$ENABLE_ADMIN" in 0) :;; *) ENABLE_ADMIN=1;; esac
 case "$ENABLE_ELEMENTX" in 0) :;; *) ENABLE_ELEMENTX=1;; esac
+case "$ENABLE_PRIVACY" in 0) :;; *) ENABLE_PRIVACY=1;; esac
 case "$REG_MODE" in token|open) :;; *) REG_MODE=token;; esac
 if [ -n "$MAX_UPLOAD" ]; then MAX_UPLOAD_BYTES="$(to_bytes "$MAX_UPLOAD")"
 elif [ -n "$SAVED_BYTES" ]; then MAX_UPLOAD_BYTES="$SAVED_BYTES"
@@ -666,6 +865,7 @@ ENABLE_CALLS=$ENABLE_CALLS
 ENABLE_WEB=$ENABLE_WEB
 ENABLE_ADMIN=$ENABLE_ADMIN
 ENABLE_ELEMENTX=$ENABLE_ELEMENTX
+ENABLE_PRIVACY=$ENABLE_PRIVACY
 MAX_UPLOAD_BYTES=$MAX_UPLOAD_BYTES
 TUWUNEL_MEM=$TUWUNEL_MEM
 LIVEKIT_API_KEY=$LK_KEY
@@ -687,6 +887,61 @@ if [ "$ENABLE_CALLS" = "1" ]; then WK_LIVEKIT="livekit_url = \"https://$RTC_HOST
 if [ "$ENABLE_ELEMENTX" = "1" ]; then OIDC_LINE="oidc_native_auth = true          # 让 Element X 手机App能自助注册/登录(原生OIDC;注册仍强制邀请码)"
 else OIDC_LINE="# oidc_native_auth = false        # Element X 手机注册关闭(成员改用网页注册/管理员建号;Element X 仍可用密码登录)"; fi
 
+# ---- 隐私加固(元数据最小化)----
+# 依据 tuwunel v1.8.2 源码核实的键;只用确认存在的键(写错的键会让容器起不来,故本块有回滚保护)。
+# 代价仅:在线状态/正在输入消失(对保密团队反而是优点)。关掉用: PRIVACY=0 sudo -E tuwunel config
+if [ "$ENABLE_PRIVACY" = "1" ]; then PRIVACY_LINES='
+# ===== 隐私加固:元数据最小化 =====
+# 【最高价值】只认 TCP 对端(=Caddy 容器),真实客户端 IP 根本进不了库。
+# tuwunel 在建设备时无条件记录 IP 且无开关可关,这是唯一缓解手段。
+# 副作用:按 IP 的限流失效(所有人看起来同一 IP);邀请制内网部署可接受。
+ip_source = "connect_info"
+
+# 日志:warn 恰好切掉两处会把 client_ip 打进容器日志的 span。切勿设 debug(会记录每个请求)。
+log = "warn"
+log_span_events = "none"
+
+# 在线状态:三个键必须一起关(只关出向会被启动校验拒绝)。关掉即不再落盘 presence,也不再刷新设备 last-seen。
+allow_local_presence = false
+allow_incoming_presence = false
+allow_outgoing_presence = false
+
+# 正在输入:tuwunel 只存内存不落盘,这两键是联邦方向的双保险。
+allow_outgoing_typing = false
+allow_incoming_typing = false
+
+# 【陷阱修复】撤回即真撤回:默认会把撤回消息的原文再留 60 天且管理员可取回。
+save_unredacted_events = false
+redaction_retention_seconds = 0
+allow_room_admins_to_request_unredacted_events = false
+
+# 资料/目录暴露面收紧
+require_auth_for_profile_requests = true
+allow_inbound_profile_lookup_federation_requests = false
+allow_device_name_federation = false
+allow_public_room_directory_without_auth = false
+lockdown_public_room_directory = true
+allow_unlisted_room_search_by_id = false
+show_all_local_users_in_user_directory = false
+
+# 管理房操作流水:默认会把注册/改密码/停用推进管理房,形成可读的元数据流水
+admin_room_notices = false
+log_guest_registrations = false
+
+# 第三方遥测(默认就关,写死防回归)
+sentry = false
+allow_jaeger = false
+tracing_flame = false
+
+# RocksDB 自身日志
+rocksdb_log_level = "error"
+rocksdb_log_stderr = false
+rocksdb_max_log_files = 1'
+else PRIVACY_LINES='# (隐私加固未启用:PRIVACY=1 sudo -E tuwunel config 可开启元数据最小化)'; fi
+
+# 改配置前先备份,便于新键不被本版 tuwunel 接受时自动回滚(见下方 READY 失败处理)
+TOML_BAK=""
+[ -f tuwunel.toml ] && { TOML_BAK="tuwunel.toml.bak-$(date +%s)"; cp -a tuwunel.toml "$TOML_BAK"; }
 cat > tuwunel.toml <<EOF
 # ===== $MARKER($(date +%F))=====
 [global]
@@ -695,7 +950,10 @@ database_path = "/var/lib/tuwunel"   # RocksDB:数据库+媒体都在这
 address = ["0.0.0.0"]            # Docker 下必须 0.0.0.0,让 Caddy 能连到
 port = 8008
 max_request_size = $MAX_UPLOAD_BYTES   # 单文件上限(字节)= $(human "$MAX_UPLOAD_BYTES")
-allow_encryption = true          # 端到端加密
+allow_encryption = true          # 允许端到端加密(注意:这只是"允许",不强制)
+# 【关键】强制新建房间默认开启 E2EE。此键默认为 "none",不写的话客户端没主动要求加密时,
+# 消息正文会以明文存进数据库——对保密场景是致命缺口。
+encryption_enabled_by_default_for_room_type = "all"
 grant_admin_to_first_user = true # 第一个注册的人=服务器管理员
 create_admin_room = true
 new_user_displayname_suffix = "" # 去掉默认昵称后缀
@@ -704,6 +962,7 @@ $OIDC_LINE
 $FED_LINE
 $TRUST_LINE
 $REG_LINES
+$PRIVACY_LINES
 
 [global.well_known]
 client = "https://$M_HOST"
@@ -871,6 +1130,11 @@ fi
 cat > Caddyfile <<EOF
 {
 	email $ACME_EMAIL
+	# 隐私:降到 ERROR,减少日志面(访问日志本就未开启=opt-in)。
+	# 不用 output discard,否则证书申请失败时无从排查。
+	log default {
+		level ERROR
+	}
 }
 
 # 委派:server_name=$DOMAIN,实际服务在 $M_HOST
@@ -1001,6 +1265,23 @@ for i in $(seq 1 40); do
   if curl -4 -fsS --max-time 4 "https://$M_HOST/_matrix/client/versions" >/dev/null 2>&1; then READY=1; ok "tuwunel 在线,HTTPS 已生效。"; break; fi
   sleep 5
 done
+if [ "$READY" -ne 1 ] && [ -n "${TOML_BAK:-}" ] && [ -f "$TOML_BAK" ]; then
+  # tuwunel 起不来最常见的原因是配置里有本版不支持的键(尤其隐私加固新键)。自动回滚,保住服务可用。
+  if ! docker compose ps tuwunel 2>/dev/null | grep -qi 'up\|healthy'; then
+    warn "tuwunel 未能启动 —— 可能本版不支持某个配置键。正在自动回滚到改动前的 tuwunel.toml…"
+    cp -a "$TOML_BAK" tuwunel.toml
+    docker compose up -d tuwunel >/dev/null 2>&1 || true
+    for i in $(seq 1 12); do
+      curl -4 -fsS --max-time 4 "https://$M_HOST/_matrix/client/versions" >/dev/null 2>&1 && { READY=1; break; }
+      sleep 5
+    done
+    if [ "$READY" -eq 1 ]; then
+      warn "已回滚并恢复服务。隐私加固未生效 —— 请把这句和 docker compose logs tuwunel --tail 30 发给作者排查键名。"
+    else
+      warn "回滚后仍未就绪,请看: cd $INSTALL_DIR && docker compose logs tuwunel --tail 40"
+    fi
+  fi
+fi
 [ "$READY" -eq 1 ] || warn "还没就绪。常见:云安全组没放行 80/443,或 DNS 未全球生效;Caddy 会自动重试证书,无需重装。看日志: cd $INSTALL_DIR && docker compose logs --tail 40"
 
 [ "$ENABLE_WEB" = "1" ] && WEB_URL="https://$DOMAIN" || WEB_URL=""
