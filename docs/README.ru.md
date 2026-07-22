@@ -8,7 +8,7 @@
 
 Рекомендуемый клиент: **Element X**. Собственный клиент **VeilX** в разработке (аккуратнее, удобнее, больше функций; открытый код, поддаётся аудиту; команда эксплуатации в Великобритании, Сингапуре и Японии). Файлы клиентов, договоры, внутренние обсуждения, голосовые и видеовстречи — всё это существует только на вашем сервере. Построено на открытом протоколе [Matrix](https://matrix.org). Исходный код открыт и доступен для аудита (бесплатно для некоммерческого использования).
 
-[English](../README.md) · [简体中文](README.zh-CN.md) · [繁體中文](README.zh-TW.md) · [粵語](README.zh-HK.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · **Русский** · [Français](README.fr.md) · [Deutsch](README.de.md) · [Italiano](README.it.md) · [Español](README.es.md) · [Bahasa Melayu](README.ms.md) · [فارسی](README.fa.md)
+[English](../README.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Русский](README.ru.md) · [Français](README.fr.md) · **Deutsch** · [Italiano](README.it.md) · [Español](README.es.md) · [Bahasa Melayu](README.ms.md) · [فارسی](README.fa.md)· [简体中文](README.zh-CN.md) · [繁體中文](README.zh-TW.md) · [粵語](README.zh-HK.md) 
 
 </div>
 
