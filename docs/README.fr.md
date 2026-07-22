@@ -8,7 +8,7 @@ Propulsée par le moteur **tuwunel** (en Rust, base de données intégrée, **sa
 
 Client recommandé : **Element X**. Un client **VeilX** dédié est en développement (plus soigné, plus simple, plus de fonctions ; open source et auditable ; équipe d'exploitation au Royaume-Uni, à Singapour et au Japon). Dossiers clients, contrats, discussions internes, réunions audio et vidéo — tout cela n'existe que sur votre propre serveur. Bâti sur le protocole ouvert [Matrix](https://matrix.org). Code source public et auditable (gratuit pour un usage non commercial).
 
-[English](../README.md) · [简体中文](README.zh-CN.md) · [繁體中文](README.zh-TW.md) · [粵語](README.zh-HK.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Русский](README.ru.md) · **Français** · [Deutsch](README.de.md) · [Italiano](README.it.md) · [Español](README.es.md) · [Bahasa Melayu](README.ms.md) · [فارسی](README.fa.md)
+[English](../README.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Русский](README.ru.md) · [Français](README.fr.md) · **Deutsch** · [Italiano](README.it.md) · [Español](README.es.md) · [Bahasa Melayu](README.ms.md) · [فارسی](README.fa.md)· [简体中文](README.zh-CN.md) · [繁體中文](README.zh-TW.md) · [粵語](README.zh-HK.md) 
 
 </div>
 
