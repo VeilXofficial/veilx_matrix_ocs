@@ -8,7 +8,7 @@
 
 推薦用戶端：**Element X**。專屬嘅 **VeilX** 用戶端開發緊（更美觀易用、功能更多、開源可稽核；營運團隊設於英國、新加坡、日本等地）。客戶資料、合約報價、內部討論、語音視像會議 —— 全部只存喺你自己嘅伺服器上。基於開放嘅 [Matrix](https://matrix.org) 協定，原始碼公開可稽核（非商業免費）。
 
-[English](../README.md) · [简体中文](README.zh-CN.md) · [繁體中文](README.zh-TW.md) · **粵語** · [日本語](README.ja.md) · [한국어](README.ko.md) · [Русский](README.ru.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [Italiano](README.it.md) · [Español](README.es.md) · [Bahasa Melayu](README.ms.md) · [فارسی](README.fa.md)
+[English](../README.md) · [简体中文](README.zh-CN.md) · [繁體中文](README.zh-TW.md) · **粵語** · [日本語](README.ja.md) · [한국어](README.ko.md) · [Русский](README.ru.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [Italiano](README.it.md) · [Español](README.es.md) · [Bahasa Melayu](README.ms.md) · [فارسی](README.fa.md)· [简体中文](README.zh-CN.md) · [繁體中文](README.zh-TW.md) · **粵語** 
 
 </div>
 
