@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # =====================================================================
-#  Matrix 轻量一键安装脚本 · tuwunel 版(通用版 t1.13)
-#  Matrix one-command installer · tuwunel edition (Universal t1.13)
+#  Matrix 轻量一键安装脚本 · tuwunel 版(通用版 t1.14)
+#  Matrix one-command installer · tuwunel edition (Universal t1.14)
+#  t1.14:【后台网址可自定义】管理面板子域名不再写死 admin.,可改成 console./manage. 等(ADMIN_SUB=,
+#         或新装向导里选)。老服务器更新脚本后,`sudo tuwunel admin-url`(或菜单 a 项)即可改:
+#         交互问新子域→提醒先加 DNS→复用 config 重生成 Caddyfile 并重启(只改这一项,数据/账号不动)。
+#         改后记得去域名商加  <新子域>.你的域名  的 A 记录(旧的 admin. 记录可删)。
 #  t1.13:【双语界面 / Bilingual UI】整个脚本 UI 现支持 English + 简体中文,单源实现:
 #         启动时询问语言(Language / 语言: [1] English [2] 中文),或安装时加 LANG_UI=en 直接英文;
 #         选择存入 .env(UI_LANG=),菜单/改配置/子命令沿用同一语言;默认(非交互/未选)仍为中文,
@@ -78,6 +82,7 @@
 #      sudo tuwunel adduser    # 加成员(一条命令建号并设密码)
 #      sudo tuwunel update        # 从 GitHub 拉最新脚本并应用新功能(数据不动)
 #      sudo tuwunel enable-admin    # 【老服务器补装 Web 管理后台 Ketesa】(只开后台,不动其它)
+#      sudo tuwunel admin-url       # 【改后台网址】admin. → 别的子域(如 console. ;需先加对应 DNS)
 #      sudo tuwunel enable-elementx # 【开 Element X 手机自助注册】(原生OIDC;disable-elementx 关)
 #      sudo tuwunel privacy        # 隐私/元数据:看能删什么、查加固状态、清日志
 #      sudo tuwunel forget-secrets  # 抗取证:涂销磁盘上的明文密码/邀请码
@@ -96,6 +101,7 @@
 #    ENABLE_FEDERATION=1|0      联邦(默认 0=关闭,纯私密孤岛)
 #    ENABLE_CALLS=1|0           语音视频通话(默认 0=关闭)
 #    ENABLE_ADMIN=1|0           Web 管理后台 Ketesa(默认 1=开;放 admin.域名,需加 DNS)
+#    ADMIN_SUB=admin            后台子域名(默认 admin;可设 console/manage 等,需加对应 DNS)
 #    CDN=1|0                    服务器前是否有 Cloudflare/CDN 代理(默认 0;放宽 DNS 预检)
 #    MAX_UPLOAD=4G              单文件上限(默认 4G;支持 K/M/G,内部转字节)
 #
@@ -271,11 +277,11 @@ disk_guard() {
 
 menu_status() {
   cd "$INSTALL_DIR"
-  local d; d="$(env_saved MATRIX_DOMAIN)"
+  local d asub; d="$(env_saved MATRIX_DOMAIN)"; asub="$(env_saved ADMIN_SUB)"; asub="${asub:-admin}"
   echo ""; echo "$(L "── Current config ──" "── 当前配置 ──")"
   echo "  $(L Domain 域名): ${d:-$(L unknown 未知)}   $(L Reg 注册): $(env_saved REG_MODE)   $(L Federation 联邦): $([ "$(env_saved ENABLE_FEDERATION)" = "1" ] && L on 开 || L off 关)   $(L Calls 通话): $([ "$(env_saved ENABLE_CALLS)" = "1" ] && L on 开 || L off 关)   $(L Web 网页): $([ "$(env_saved ENABLE_WEB)" = "1" ] && L on 开 || L off 关)   $(L Admin 后台): $([ "$(env_saved ENABLE_ADMIN)" = "1" ] && L on 开 || L off 关)   $(L Big-files 大文件): $(human "$(env_saved MAX_UPLOAD_BYTES)")"
   [ "$(env_saved ENABLE_WEB)" = "1" ] && echo "  $(L "Web client:" "网页客户端:") https://${d}$(L "(members register/log in in a browser)" "(成员浏览器直接注册/登录)")"
-  [ "$(env_saved ENABLE_ADMIN)" = "1" ] && echo "  $(L "Admin panel:" "管理后台: ") https://admin.${d}$(L "(admin user/password login, graphical management)" "(管理员账号密码登录,图形化管理)")"
+  [ "$(env_saved ENABLE_ADMIN)" = "1" ] && echo "  $(L "Admin panel:" "管理后台: ") https://${asub}.${d}$(L "(admin user/password login, graphical management)" "(管理员账号密码登录,图形化管理)")"
   [ -f /etc/cron.d/tuwunel-backup ] && echo "  $(L "Auto backup:" "自动备份: ") $(L On 已开启)($(grep -oE '#.*' /etc/cron.d/tuwunel-backup 2>/dev/null))" || echo "  $(L "Auto backup:" "自动备份: ") $(L "Off (enable with sudo tuwunel autobackup)" "未开启(sudo tuwunel autobackup 可开)")"
   [ "$(env_saved USE_CDN)" = "1" ] && echo "  $(L "CDN mode:" "CDN 模式:") $(L "flagged (DNS pre-check relaxed; matrix/media must be grey-cloud)" "已标记(DNS 预检放宽;matrix/媒体须灰云)")"
   echo "  $(L "Phone signup (Element X):" "手机App注册(Element X):") $([ "$(env_saved ENABLE_ELEMENTX)" = "1" ] && L "on (native OIDC, invite token still required)" "开(原生OIDC,注册仍需邀请码)" || L "off (Element X password login only; register via web / admin)" "关(Element X 仅密码登录;注册走网页/管理员建号)")"
@@ -631,6 +637,32 @@ if [ "${1:-}" = "disable-elementx" ]; then ENABLE_ELEMENTX=0; RECONFIG=1; set --
 # 子命令: privacy —— 隐私/元数据:看能删什么、当前加固状态、清容器日志
 if [ "${1:-}" = "privacy" ]; then INSTALL_DIR="${INSTALL_DIR:-/opt/tuwunel}"; menu_privacy; exit 0; fi
 if [ "${1:-}" = "forget-secrets" ]; then INSTALL_DIR="${INSTALL_DIR:-/opt/tuwunel}"; menu_forget_secrets; exit 0; fi
+# 子命令: admin-url —— 【老服务器改后台网址】把管理面板子域名 admin. 改成别的(如 console. / manage.)
+# 交互问新子域 → 提醒先加 DNS → 复用 config 重生成 Caddyfile 并重启(只改这一项,数据/账号不动)。
+if [ "${1:-}" = "admin-url" ]; then
+  INSTALL_DIR="${INSTALL_DIR:-/opt/tuwunel}"
+  [ -d "$INSTALL_DIR" ] || die "$(L "$INSTALL_DIR not found — finish the deployment first" "找不到 $INSTALL_DIR,先完成部署")"
+  AD="$(env_saved MATRIX_DOMAIN)"; [ -n "$AD" ] || die "$(L "Can't read the domain — deployment may be incomplete" "读不到域名,部署可能未完成")"
+  [ "$(env_saved ENABLE_ADMIN)" = "1" ] || { warn "$(L "The admin panel is OFF. Enable it first (sudo tuwunel → 4), then change its URL." "后台未开启。请先开启(sudo tuwunel → 第 4 项),再改网址。")"; exit 0; }
+  ACUR="$(env_saved ADMIN_SUB)"; ACUR="${ACUR:-admin}"; AIP="$(env_saved PUBLIC_IP)"
+  printf '\n%s%s%s\n' "$C_B$C_CYAN" "$(L "== Change admin panel URL ==" "== 修改后台网址 ==")" "$C_RESET"
+  echo "$(L "Current: https://$ACUR.$AD" "当前: https://$ACUR.$AD")"
+  ANEW=""
+  while :; do
+    ask_opt "$(L "→ New subdomain [Enter=$ACUR] (e.g. console / manage): " "→ 新子域名 [回车=$ACUR](如 console / manage): ")" "$ACUR"
+    ANEW="$(echo "$REPLY" | tr 'A-Z' 'a-z' | tr -d '[:space:]')"
+    case "$ANEW" in matrix|livekit|matrix-rtc|www) warn "$(L "'$ANEW' is reserved by another service — pick another." "『$ANEW』被其它服务占用 —— 换一个。")"; has_tty || exit 1; continue;; esac
+    echo "$ANEW" | grep -Eq '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$' && break
+    warn "$(L "Invalid subdomain — one label only: lowercase letters/digits/hyphen, no dots." "子域名不合法 —— 只能一个标签:小写字母/数字/连字符,不含点。")"
+    has_tty || exit 1
+  done
+  [ "$ANEW" = "$ACUR" ] && { ok "$(L "Unchanged." "未改动。")"; exit 0; }
+  echo ""
+  warn "$(L "IMPORTANT — add DNS FIRST: an A record for  $ANEW.$AD  →  ${AIP:-your server IP}" "重要 —— 先加 DNS:给  $ANEW.$AD  加一条 A 记录  →  ${AIP:-你的服务器IP}")"
+  echo "$(L "(the old record $ACUR.$AD can be removed afterwards)" "(旧的 $ACUR.$AD 记录之后可以删掉)")"
+  press_enter "$(L "Added the DNS record? Press Enter to apply (Ctrl+C to abort)… " "加好 DNS 记录了?回车应用(Ctrl+C 取消)… ")"
+  exec env ADMIN_SUB="$ANEW" INSTALL_DIR="$INSTALL_DIR" bash "$0" config
+fi
 
 # ---------------------------------------------------------------------
 # 0. 基础 / 已部署检测 → 管理菜单
@@ -666,6 +698,7 @@ if [ "$RECONFIG" -eq 0 ] && [ -f "$INSTALL_DIR/CREDENTIALS.txt" ] \
   p) $(L "Privacy hardening / metadata cleanup (what can be deleted, clear logs)" "隐私加固 / 元数据清理(看能删什么、清日志)")
   s) $(L "Wipe plaintext credentials file (anti-forensics: remove on-disk password/token)" "涂销明文凭据文件(抗取证:去掉磁盘上的明文密码/邀请码)")
   b) $(L "Scheduled encrypted backup (optional: weekly auto, with rotation/skip-if-full)" "自动定时加密备份(可选:开启后每周自动,含轮转/满盘跳过)")
+  a) $(L "Change admin panel URL (admin. → another subdomain)" "修改后台网址(admin. → 别的子域)")
   0) $(L Exit 退出)
 EOF
       MCHOICE=""
@@ -678,7 +711,8 @@ EOF
         4) if [ "$(env_saved ENABLE_ADMIN)" = "1" ]; then
              [ -f "$SELF_BIN" ] && INSTALL_DIR="$INSTALL_DIR" bash "$SELF_BIN" disable-admin || warn "$(L "script copy missing" "缺少脚本副本")"
            else
-             echo "$(L "Enabling requires admin.${MENU_DOMAIN} already resolving to this host (otherwise it stalls at the DNS check)." "开启后需要 admin.${MENU_DOMAIN} 已解析到本机(否则会卡在 DNS 检查)。")"
+             MASUB="$(env_saved ADMIN_SUB)"; MASUB="${MASUB:-admin}"
+             echo "$(L "Enabling requires ${MASUB}.${MENU_DOMAIN} already resolving to this host (otherwise it stalls at the DNS check)." "开启后需要 ${MASUB}.${MENU_DOMAIN} 已解析到本机(否则会卡在 DNS 检查)。")"
              [ -f "$SELF_BIN" ] && INSTALL_DIR="$INSTALL_DIR" bash "$SELF_BIN" enable-admin || warn "$(L "script copy missing" "缺少脚本副本")"
            fi ;;
         5) menu_backup ;;
@@ -693,6 +727,8 @@ EOF
         p|P) menu_privacy ;;
         s|S) menu_forget_secrets ;;
         b|B) menu_autobackup ;;
+        a|A) [ -f "$SELF_BIN" ] && INSTALL_DIR="$INSTALL_DIR" bash "$SELF_BIN" admin-url || warn "$(L "script copy missing" "缺少脚本副本")"
+             [ -d "$INSTALL_DIR" ] || exit 0 ;;
         0|q|Q) echo "$(L Bye. 再见。)"; exit 0 ;;
         *) warn "$(L "Invalid choice, enter 0-10" "无效选择,请输入 0-10")" ;;
       esac
@@ -732,7 +768,15 @@ until domain_ok "$DOMAIN"; do
 done
 
 ACME_EMAIL="${ACME_EMAIL:-admin@$DOMAIN}"
-M_HOST="matrix.$DOMAIN"; LK_HOST="livekit.$DOMAIN"; RTC_HOST="matrix-rtc.$DOMAIN"; A_HOST="admin.$DOMAIN"
+M_HOST="matrix.$DOMAIN"; LK_HOST="livekit.$DOMAIN"; RTC_HOST="matrix-rtc.$DOMAIN"
+# 管理后台子域名(默认 admin;可改成 console/manage 等)。ADMIN_SUB= 预设或安装时选择,存 .env。
+_ADMIN_SUB_ENV="${ADMIN_SUB:-}"                                  # 记录是否由环境变量显式传入(用于 EXPLICIT 判定)
+ADMIN_SUB="${ADMIN_SUB:-$(env_saved ADMIN_SUB)}"; ADMIN_SUB="${ADMIN_SUB:-admin}"
+ADMIN_SUB="$(echo "$ADMIN_SUB" | tr 'A-Z' 'a-z' | tr -d '[:space:]')"
+# 只允许一个合法 DNS 标签(小写字母数字+连字符,不含点);非法或与其它服务冲突则回落 admin
+echo "$ADMIN_SUB" | grep -Eq '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$' || ADMIN_SUB="admin"
+case "$ADMIN_SUB" in matrix|livekit|matrix-rtc|www) ADMIN_SUB="admin";; esac
+A_HOST="$ADMIN_SUB.$DOMAIN"
 apt-get update -qq >/dev/null 2>&1 || true
 command -v curl >/dev/null 2>&1 || apt-get install -y -qq curl || die "$(L "curl install failed" "curl 安装失败")"
 command -v openssl >/dev/null 2>&1 || apt-get install -y -qq openssl || die "$(L "openssl install failed" "openssl 安装失败")"
@@ -742,7 +786,7 @@ bold "$(L "Target: $DOMAIN  →  server ${PUBLIC_IP:-unknown}  →  dir $INSTALL
 # ---------------------------------------------------------------------
 # 选项(回车=推荐默认;重跑沿用;环境变量可预设)
 # ---------------------------------------------------------------------
-EXPLICIT=0; [ -n "${REG_MODE:-}${ENABLE_FEDERATION:-}${ENABLE_CALLS:-}${ENABLE_WEB:-}${ENABLE_ADMIN:-}${ENABLE_ELEMENTX:-}${ENABLE_PRIVACY:-}${PRIVACY:-}${MAX_UPLOAD:-}" ] && EXPLICIT=1
+EXPLICIT=0; [ -n "${REG_MODE:-}${ENABLE_FEDERATION:-}${ENABLE_CALLS:-}${ENABLE_WEB:-}${ENABLE_ADMIN:-}${ENABLE_ELEMENTX:-}${ENABLE_PRIVACY:-}${PRIVACY:-}${MAX_UPLOAD:-}${_ADMIN_SUB_ENV:-}" ] && EXPLICIT=1
 REG_MODE="${REG_MODE:-$(env_saved REG_MODE)}"
 ENABLE_FEDERATION="${ENABLE_FEDERATION:-$(env_saved ENABLE_FEDERATION)}"
 ENABLE_CALLS="${ENABLE_CALLS:-$(env_saved ENABLE_CALLS)}"
@@ -822,6 +866,18 @@ if has_tty && { [ -z "$REG_MODE" ] || [ -z "$ENABLE_FEDERATION" ] || [ -z "$ENAB
   [n] 关闭 —— 只用命令行(sudo tuwunel 菜单 / 管理员房间命令)管理。")"
     ask_opt "$(L "→ [Y/n, Enter=$DEF_ADMIN]: " "→ [Y/n,回车=$DEF_ADMIN]: ")" "$DEF_ADMIN"
     case "$REPLY" in n|N) ENABLE_ADMIN=0;; *) ENABLE_ADMIN=1;; esac
+    # 新装时可自定义后台子域名(默认 admin)。老服务器改子域走 `sudo tuwunel admin-url`。
+    if [ "$ENABLE_ADMIN" = 1 ] && [ "$RECONFIG" -eq 0 ]; then
+      while :; do
+        ask_opt "$(L "   → Admin panel subdomain [Enter=$ADMIN_SUB] (e.g. admin / console / manage): " "   → 后台面板子域名 [回车=$ADMIN_SUB](如 admin / console / manage): ")" "$ADMIN_SUB"
+        NEWSUB="$(echo "$REPLY" | tr 'A-Z' 'a-z' | tr -d '[:space:]')"
+        case "$NEWSUB" in matrix|livekit|matrix-rtc|www) warn "$(L "'$NEWSUB' is reserved by another service — pick another." "『$NEWSUB』被其它服务占用 —— 换一个。")"; has_tty || { NEWSUB="admin"; break; }; continue;; esac
+        echo "$NEWSUB" | grep -Eq '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$' && break
+        warn "$(L "Invalid subdomain — one label only: lowercase letters/digits/hyphen, no dots." "子域名不合法 —— 只能一个标签:小写字母/数字/连字符,不含点。")"
+        has_tty || { NEWSUB="admin"; break; }
+      done
+      ADMIN_SUB="$NEWSUB"; A_HOST="$ADMIN_SUB.$DOMAIN"
+    fi
   fi
 
   if [ -z "$MAX_UPLOAD" ]; then
@@ -1022,6 +1078,7 @@ ENABLE_FEDERATION=$ENABLE_FEDERATION
 ENABLE_CALLS=$ENABLE_CALLS
 ENABLE_WEB=$ENABLE_WEB
 ENABLE_ADMIN=$ENABLE_ADMIN
+ADMIN_SUB=$ADMIN_SUB
 ENABLE_ELEMENTX=$ENABLE_ELEMENTX
 ENABLE_PRIVACY=$ENABLE_PRIVACY
 USE_CDN=$USE_CDN
