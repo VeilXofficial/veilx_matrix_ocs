@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # =====================================================================
-#  Matrix 轻量一键安装脚本 · tuwunel 版(通用版 t1.15)
-#  Matrix one-command installer · tuwunel edition (Universal t1.15)
+#  Matrix 轻量一键安装脚本 · tuwunel 版(通用版 t1.16)
+#  Matrix one-command installer · tuwunel edition (Universal t1.16)
+#  t1.16:【装好后可随时切换界面语言】此前语言只在首次安装时问一次、之后无处可改。现新增
+#         菜单项 L 与 `sudo tuwunel lang`:在 English / 简体中文 间切换,写入 .env(UI_LANG=)持久化,
+#         菜单立即用新语言重绘。(老服务器需先把副本更新到本版,见 t1.15 补救。)
 #  t1.15:【修复:重跑本地脚本不刷新已装副本】菜单刷新副本用的是 cd 之后的相对 $0,会判存在失败而
 #         跳过复制 —— 导致 `bash tuwunel.sh` 重跑后,菜单显示新功能但按下去仍调用 /opt 里的旧副本
 #         (典型:选 a『改后台网址』却弹出没有 a 的旧菜单)。改用 cd 前解析好的绝对路径 $SELF_SRC。
@@ -87,6 +90,7 @@
 #      sudo tuwunel update        # 从 GitHub 拉最新脚本并应用新功能(数据不动)
 #      sudo tuwunel enable-admin    # 【老服务器补装 Web 管理后台 Ketesa】(只开后台,不动其它)
 #      sudo tuwunel admin-url       # 【改后台网址】admin. → 别的子域(如 console. ;需先加对应 DNS)
+#      sudo tuwunel lang            # 【切换界面语言】English / 简体中文(存 .env,持久生效)
 #      sudo tuwunel enable-elementx # 【开 Element X 手机自助注册】(原生OIDC;disable-elementx 关)
 #      sudo tuwunel privacy        # 隐私/元数据:看能删什么、查加固状态、清日志
 #      sudo tuwunel forget-secrets  # 抗取证:涂销磁盘上的明文密码/邀请码
@@ -641,6 +645,23 @@ if [ "${1:-}" = "disable-elementx" ]; then ENABLE_ELEMENTX=0; RECONFIG=1; set --
 # 子命令: privacy —— 隐私/元数据:看能删什么、当前加固状态、清容器日志
 if [ "${1:-}" = "privacy" ]; then INSTALL_DIR="${INSTALL_DIR:-/opt/tuwunel}"; menu_privacy; exit 0; fi
 if [ "${1:-}" = "forget-secrets" ]; then INSTALL_DIR="${INSTALL_DIR:-/opt/tuwunel}"; menu_forget_secrets; exit 0; fi
+# 子命令: lang —— 切换脚本界面语言(English / 简体中文),写进 .env 持久化(装好后随时可改)
+if [ "${1:-}" = "lang" ]; then
+  INSTALL_DIR="${INSTALL_DIR:-/opt/tuwunel}"
+  [ -f "$INSTALL_DIR/.env" ] || die "$(L "$INSTALL_DIR/.env not found — is the server deployed?" "找不到 $INSTALL_DIR/.env(服务器是否已部署?)")"
+  LCUR="$(env_saved UI_LANG)"; LCUR="${LCUR:-zh}"
+  printf '\nLanguage / 语言   (当前 Current: %s)\n  [1] English\n  [2] 中文(简体)\n' "$LCUR"
+  ask_opt "→ [1/2]: " ""
+  case "$REPLY" in 1) LNEW=en;; 2) LNEW=zh;; *) echo "$(L "Unchanged." "未改动。")"; exit 0;; esac
+  if grep -qE '^UI_LANG=' "$INSTALL_DIR/.env" 2>/dev/null; then
+    sed -i "s/^UI_LANG=.*/UI_LANG=$LNEW/" "$INSTALL_DIR/.env"
+  else
+    printf 'UI_LANG=%s\n' "$LNEW" >> "$INSTALL_DIR/.env"
+  fi
+  UI_LANG="$LNEW"
+  ok "$(L "Interface language set to English (menu / prompts / messages)." "界面语言已切换为简体中文(菜单/提示/消息)。")"
+  exit 0
+fi
 # 子命令: admin-url —— 【老服务器改后台网址】把管理面板子域名 admin. 改成别的(如 console. / manage.)
 # 交互问新子域 → 提醒先加 DNS → 复用 config 重生成 Caddyfile 并重启(只改这一项,数据/账号不动)。
 if [ "${1:-}" = "admin-url" ]; then
@@ -707,6 +728,7 @@ if [ "$RECONFIG" -eq 0 ] && [ -f "$INSTALL_DIR/CREDENTIALS.txt" ] \
   s) $(L "Wipe plaintext credentials file (anti-forensics: remove on-disk password/token)" "涂销明文凭据文件(抗取证:去掉磁盘上的明文密码/邀请码)")
   b) $(L "Scheduled encrypted backup (optional: weekly auto, with rotation/skip-if-full)" "自动定时加密备份(可选:开启后每周自动,含轮转/满盘跳过)")
   a) $(L "Change admin panel URL (admin. → another subdomain)" "修改后台网址(admin. → 别的子域)")
+  L) $(L "Switch interface language → 中文" "切换界面语言 → English")   (语言 / Language)
   0) $(L Exit 退出)
 EOF
       MCHOICE=""
@@ -737,6 +759,8 @@ EOF
         b|B) menu_autobackup ;;
         a|A) [ -f "$SELF_BIN" ] && INSTALL_DIR="$INSTALL_DIR" bash "$SELF_BIN" admin-url || warn "$(L "script copy missing" "缺少脚本副本")"
              [ -d "$INSTALL_DIR" ] || exit 0 ;;
+        l|L) [ -f "$SELF_BIN" ] && INSTALL_DIR="$INSTALL_DIR" bash "$SELF_BIN" lang || warn "$(L "script copy missing" "缺少脚本副本")"
+             UI_LANG="$(env_saved UI_LANG)"; [ -n "$UI_LANG" ] || UI_LANG=zh ;;   # 重读,菜单立即用新语言重绘
         0|q|Q) echo "$(L Bye. 再见。)"; exit 0 ;;
         *) warn "$(L "Invalid choice, enter 0-10" "无效选择,请输入 0-10")" ;;
       esac
