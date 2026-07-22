@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # =====================================================================
-#  Matrix 轻量一键安装脚本 · tuwunel 版(通用版 t1.14)
-#  Matrix one-command installer · tuwunel edition (Universal t1.14)
+#  Matrix 轻量一键安装脚本 · tuwunel 版(通用版 t1.15)
+#  Matrix one-command installer · tuwunel edition (Universal t1.15)
+#  t1.15:【修复:重跑本地脚本不刷新已装副本】菜单刷新副本用的是 cd 之后的相对 $0,会判存在失败而
+#         跳过复制 —— 导致 `bash tuwunel.sh` 重跑后,菜单显示新功能但按下去仍调用 /opt 里的旧副本
+#         (典型:选 a『改后台网址』却弹出没有 a 的旧菜单)。改用 cd 前解析好的绝对路径 $SELF_SRC。
+#         已装旧版补救:`sudo tuwunel update`(联网拉最新),或 `sudo cp ~/你的.sh /opt/tuwunel/tuwunel-installer.sh`。
 #  t1.14:【后台网址可自定义】管理面板子域名不再写死 admin.,可改成 console./manage. 等(ADMIN_SUB=,
 #         或新装向导里选)。老服务器更新脚本后,`sudo tuwunel admin-url`(或菜单 a 项)即可改:
 #         交互问新子域→提醒先加 DNS→复用 config 重生成 Caddyfile 并重启(只改这一项,数据/账号不动)。
@@ -672,9 +676,13 @@ fi
 if [ "$RECONFIG" -eq 0 ] && [ -f "$INSTALL_DIR/CREDENTIALS.txt" ] \
    && grep -q "$MARKER" "$INSTALL_DIR/tuwunel.toml" 2>/dev/null; then
   cd "$INSTALL_DIR"; SELF_BIN="$INSTALL_DIR/tuwunel-installer.sh"
-  # 重跑安装命令时,把本地脚本副本刷新成当前这份(这样老部署重跑一键命令即可拿到新版),并刷新全局命令
-  if [ -f "${0:-}" ] && [ "$(readlink -f -- "${0:-}" 2>/dev/null)" != "$(readlink -f -- "$SELF_BIN" 2>/dev/null)" ]; then
-    cp -f "$0" "$SELF_BIN" 2>/dev/null || true
+  # 重跑安装命令时,把本地脚本副本刷新成当前这份(这样老部署重跑一键命令即可拿到新版),并刷新全局命令。
+  # 【t1.15 修复】必须用 cd 之前就解析好的【绝对路径】$SELF_SRC:此处已 cd 到 INSTALL_DIR,
+  # 再用相对的 $0(如 `bash tuwunel.sh` 时 $0=tuwunel.sh)判存在会失败 → 复制被跳过 →
+  # 菜单显示的是新功能、但按下去调用的仍是旧副本(经典症状:选 a 弹出没有 a 的旧菜单)。
+  if [ -n "$SELF_SRC" ] && [ -f "$SELF_SRC" ] \
+     && [ "$(readlink -f -- "$SELF_SRC" 2>/dev/null)" != "$(readlink -f -- "$SELF_BIN" 2>/dev/null)" ]; then
+    cp -f "$SELF_SRC" "$SELF_BIN" 2>/dev/null && chmod +x "$SELF_BIN" 2>/dev/null || true
   fi
   install_launcher "$SELF_BIN"
   if has_tty; then
