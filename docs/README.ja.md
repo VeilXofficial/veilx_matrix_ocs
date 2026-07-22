@@ -8,9 +8,8 @@
 
 推奨クライアント：**Element X**。専用の **VeilX** クライアントを開発中（より洗練され使いやすく機能も豊富、オープンソースで監査可能。運用チームは英国・シンガポール・日本などに拠点）。顧客資料、契約書、社内の議論、音声・ビデオ会議 — すべてがあなた自身のサーバーだけに存在します。オープンプロトコル [Matrix](https://matrix.org) がベース。ソースは公開・監査可能（非商用は無料）。
 
-[English](../README.md) · [简体中文](README.zh-CN.md) · [繁體中文](README.zh-TW.md) · [粵語](README.zh-HK.md) · **日本語** · [한국어](README.ko.md) · [Русский](README.ru.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [Italiano](README.it.md) · [Español](README.es.md) · [Bahasa Melayu](README.ms.md) · [فارسی](README.fa.md)
+[English](../README.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Русский](README.ru.md) · [Français](README.fr.md) · **Deutsch** · [Italiano](README.it.md) · [Español](README.es.md) · [Bahasa Melayu](README.ms.md) · [فارسی](README.fa.md)· [简体中文](README.zh-CN.md) · [繁體中文](README.zh-TW.md) · [粵語](README.zh-HK.md) 
 
-</div>
 
 ---
 
