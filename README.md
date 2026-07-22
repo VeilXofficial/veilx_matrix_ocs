@@ -1,286 +1,335 @@
 <div align="center">
 
-# Matrix 私有通讯服务器 · 一键部署
+# Private Matrix Communication Server · One-Command Deploy (tuwunel edition)
 
-**你的服务器,你的数据 —— 为商业机密保护而生的自托管团队通讯系统。推荐使用ElementX客户端 VeilX客户端正在开发中，VeilX相比ElementX外观更加美观，整体更加易用，支持功能更多，修改Bug更快，代码开源可审计，运维团队设立在英国、新加坡、日本等地区。 客户资料、报价合同、内部讨论、语音视频会议 —— 全部只存在于你自己的服务器上。 一行命令部署,默认全封闭配置,不懂网络技术也能用:每个选择都有大白话说明。基于 [Matrix](https://matrix.org) 开放协议,端到端加密,源码公开可审计(非商业免费)**
+**Your server, your data — a self-hosted team messenger built for confidentiality and data sovereignty.**
+
+Powered by **tuwunel** (Rust engine, embedded database, **no PostgreSQL**): lighter, more stable, and able to **send large files / photos / long videos like Telegram**. 2 GB of RAM comfortably runs a mid-sized team. End-to-end encryption, metadata minimisation and invite-only registration are **on by default**. One command to deploy — you don't need to be a sysadmin; every option is explained in plain language.
+
+Recommended client: **Element X**. A dedicated **VeilX** client is in development (cleaner, easier, more features, open-source and auditable; operations team based in the UK, Singapore and Japan). Client files, contracts, internal discussions, voice & video meetings — all of it lives only on your own server. Built on the open [Matrix](https://matrix.org) protocol. Source is public and auditable (free for non-commercial use).
+
+**English** · [简体中文](docs/README.zh-CN.md) · [繁體中文](docs/README.zh-TW.md) · [粵語](docs/README.zh-HK.md) · [日本語](docs/README.ja.md) · [한국어](docs/README.ko.md) · [Русский](docs/README.ru.md) · [Français](docs/README.fr.md) · [Deutsch](docs/README.de.md) · [Italiano](docs/README.it.md) · [Español](docs/README.es.md) · [Bahasa Melayu](docs/README.ms.md) · [فارسی](docs/README.fa.md)
 
 </div>
 
 ---
 
-## ✨ 装完你能得到什么
+## ✨ What you get
 
-- 💬 文字聊天、群聊(端到端加密,服务器也看不到内容)
-- 🖼️ 图片、视频、文件互传(单文件最大 100MB)
-- 📞 一对一 / 多人群组语音、视频通话
-- 🔒 数据 100% 在你自己的服务器上,没有广告、没有审查、没有"第三人"
-- 📱 手机 / 电脑全平台可用(兼容 Element X 等所有 Matrix 客户端)
-- 👥 团队成员由你创建账号,外人无法注册
+- 💬 Text chat and group rooms (**end-to-end encrypted — the server and your hosting provider cannot read message content**)
+- 📁 **Send large files / photos / long videos** (default per-file limit **4 GB**, configurable higher — this is the headline feature)
+- 📞 One-to-one and group voice / video calls (optional)
+- 📱 Self-registration from your phone: install **Element X**, enter your domain, register and log in — no need to visit element.io
+- 🌐 Your own web client: open `https://your-domain` in a browser to register/log in — no app required
+- 🖥️ **Graphical web admin panel** (Ketesa): manage users, issue/revoke invite codes, review rooms and media
+- 🔒 **Privacy-hardened by default**: real client IP never stored, redactions are permanent, presence off, logs don't record IPs
+- 👥 Invite-only: by default only people with an invite code can register — outsiders can't get in
+- ⚡ **Resource-efficient**: single Rust process, no PostgreSQL — 2 GB of RAM serves ~300 people
 
 ---
 
-## 📋 开始前的准备清单(3 样)
+## 📋 Before you start (3 things)
 
-| 需要什么 | 具体要求 | 去哪儿弄 |
+| What | Requirement | Where |
 |---|---|---|
-| **一台海外云服务器** | Ubuntu 22.04 或 24.04 系统,有公网 IP;**推荐 2GB 内存**(1GB 也能装:安装时关闭通话选项,适合小团队纯文字) | 推荐 **CN2 GIA 线路**商家:[搬瓦工 BandwagonHost](https://bandwagonhost.com)、[DMIT](https://www.dmit.io)、HostDare、GigsGigsCloud 等 |
-| **一个域名** | 任意后缀都行(.com / .org / .net…) | [Namecheap](https://www.namecheap.com)、[Cloudflare](https://www.cloudflare.com/products/registrar/)、[Porkbun](https://porkbun.com) 等海外注册商,一年几十元 |
-| **10 分钟** | 全程复制粘贴,不需要会编程 | — |
+| **A cloud server (VPS)** | Ubuntu 22.04 / 24.04 (or Debian 11+), a public IP. **Size the RAM by team size** (see below). **Provision enough disk if you share large files.** | [Hetzner](https://www.hetzner.com/cloud), [OVHcloud](https://www.ovhcloud.com/en/vps/), [Netcup](https://www.netcup.com), [Contabo](https://contabo.com), or any provider you trust |
+| **A domain name** | Any TLD (.com / .org / .net…) | [Namecheap](https://www.namecheap.com), [Porkbun](https://porkbun.com), [Cloudflare Registrar](https://www.cloudflare.com/products/registrar/) |
+| **10 minutes** | Copy-paste all the way; no coding needed | — |
 
-> 💡 **为什么选 CN2 GIA 线路?** 这是中国电信的高级国际线路,从国内访问延迟低、不绕路、晚高峰不卡,聊天秒发、通话流畅。普通便宜 VPS(Vultr/RackNerd 等)也能用,但国内连接质量看运气。
-> 💡 **为什么选海外商家?** 无需实名认证、无需备案,服务器和域名都不受国内监管约束——这正是自托管的意义。
-> 💡 买服务器时系统镜像务必选 **Ubuntu 22.04** 或 **24.04**。2GB 内存即可流畅供小团队使用(脚本会自动加虚拟内存优化)。
-> 💡 **按人数选配置**(日常同时活跃人数,纯文字图片;开通话请再升一档):1GB≈30 人以内 · 2GB≈100 人 · **4GB/2核≈200 人以上**。人多了可在服务商面板升级套餐(数据保留),再把 `/opt/matrix/.env` 里的 `SYNAPSE_MEM`/`POSTGRES_MEM` 调大并 `docker compose up -d` 即可。
+> 💡 **Size the RAM by active-user count** (concurrently active, federation off, chat + files): **1 GB** ≈ a few dozen people (turn calls off) · **2 GB** ≈ 300 people · **4 GB / 2 vCPU** ≈ 500 people. tuwunel is light — CPU is rarely the bottleneck.
+> 💡 **Disk is the real variable for large files.** Media is stored on the server's local disk and, being end-to-end encrypted, cannot be deduplicated. Heavy large-file use can add hundreds of GB to TB per month. Use a ≥ 50–100 GB system disk; heavy users should provision a large data volume or object storage, and keep an eye on the "Clean up disk" menu item.
+> 💡 **Jurisdiction matters for privacy.** Pick a provider and country you're comfortable with — the host can, in principle, be compelled. End-to-end encryption protects message *content* regardless, but metadata lives on the host.
+> 💡 Always choose an **Ubuntu 22.04 / 24.04** image when ordering. If RAM is under 2.5 GB, the script automatically adds swap.
 
 ---
 
-## 第 0 步:准备操作系统(买对了就跳过)
+## Step 0 — Prepare the OS (skip if you already ordered it right)
 
-本方案只支持 **Ubuntu 22.04 / 24.04**(或 Debian 11+)系统。
+Only **Ubuntu 22.04 / 24.04** (or Debian 11+) is supported.
 
-- **新买服务器**:下单时「操作系统 / OS / Image」一栏选 **Ubuntu 22.04 x86_64**(或 24.04),本步就完成了
-- **已有服务器,但系统不对 / 不确定**:去服务商控制台找「重装系统 / Reinstall / Install new OS」,选 Ubuntu 22.04 重装
-  - 搬瓦工:KiwiVM 面板 → **Install new OS**
-  - DMIT:控制面板 → **Reinstall**
-  - ⚠️ 重装会**清空服务器上的全部数据**,新服务器无所谓,老服务器先备份
-- **怎么确认当前系统**:连上服务器(见第 3 步)后执行 `cat /etc/os-release`,看 `VERSION` 是不是 22.04 / 24.04
-- 装错了也不怕:脚本检测到不支持的系统会用中文明确告诉你,不会乱装
+- **New server**: pick **Ubuntu 22.04 x86_64** (or 24.04) in the "OS / Image" field when ordering — done.
+- **Wrong OS**: use your provider's "Reinstall / Rebuild" to install Ubuntu 22.04. ⚠️ This **wipes all data** — back up an existing server first.
+- Not sure what you're running? After connecting (Step 3), run `cat /etc/os-release`.
+- If you install on the wrong OS, the script detects it and tells you clearly — it won't break anything.
 
-## 第 1 步:给域名添加 5 条解析记录(约 2 分钟)
+---
 
-登录你**买域名的网站**,找到「域名解析 / DNS 解析 / DNS Records」,添加 **5 条 A 记录**。
+## Step 1 — Add DNS records (~2 minutes)
 
-假设你的域名是 `mychat.org`,服务器公网 IP 是 `1.2.3.4`,就这样填:
+In your **domain registrar's** DNS panel, add **A records**.
 
-| 记录类型 | 主机记录(名称) | 记录值(指向) | 用途 |
+Assuming your domain is `mychat.org` and your server IP is `1.2.3.4`:
+
+| Type | Host (name) | Value | Purpose |
 |---|---|---|---|
-| A | `@`(代表主域名) | `1.2.3.4` | 主域名 |
-| A | `matrix` | `1.2.3.4` | 聊天服务器 |
-| A | `admin` | `1.2.3.4` | 网页管理后台 |
-| A | `livekit` | `1.2.3.4` | 通话(关通话可省) |
-| A | `matrix-rtc` | `1.2.3.4` | 通话(关通话可省) |
+| A | `@` (root domain) | `1.2.3.4` | Root domain + web client + delegation |
+| A | `matrix` | `1.2.3.4` | The homeserver |
+| A | `admin` | `1.2.3.4` | Web admin panel (skip if admin off) |
+| A | `livekit` | `1.2.3.4` | Calls (skip if calls off) |
+| A | `matrix-rtc` | `1.2.3.4` | Calls (skip if calls off) |
 
-> 📌 主机记录只填 `matrix` 这样的**前缀**,不要填完整的 `matrix.mychat.org`(面板会自动补全)。
-> 📌 服务器公网 IP 在你买服务器的控制台首页能看到。
-> 📌 添加后一般 1~10 分钟生效;没生效也没关系,安装脚本会自动等待。
-> 📌 关闭通话时只需前 3 条(`@` / `matrix` / `admin`);`admin` 少加也能装,只是网页后台暂时打不开,补上即可。
-> ⚠️ **用 Cloudflare 管理域名的注意**:这几条记录的"代理状态"必须是**灰色云(仅 DNS)**,不能开橙色云(代理)——橙色云会挡住通话流量。点一下那朵云就能切换。
+> 📌 The host field takes only the **prefix** (`matrix`), not the full domain.
+> 📌 Records propagate in 1–10 minutes; the installer waits automatically if they're not live yet.
+> 📌 For chat + files only (calls off), you only need `@` / `matrix` / `admin`.
+> ⚠️ **Using Cloudflare?** These records must be **grey-cloud (DNS only)** — **do not enable the orange cloud (proxy)**. The proxy would ① cap large files at 100 MB (Free/Pro) ② prevent certificate issuance ③ block call media. The installer asks whether you use a CDN (answer yes to relax the DNS check), but the `matrix` host must stay grey-cloud.
 
-## 第 2 步:放行端口(约 1 分钟)
+---
 
-登录你**买服务器的网站**控制台,找到「安全组 / 防火墙 / Firewall」,放行:
+## Step 2 — Open firewall ports (~1 minute)
 
-| 端口 | 协议 | 用途 |
+In your provider's "Security Group / Firewall", allow:
+
+| Port | Protocol | Purpose |
 |---|---|---|
-| 80 | TCP | 申请 HTTPS 证书 |
-| 443 | TCP + UDP | 网页与加密通信 |
-| 7881 | TCP | 通话备用通道 |
-| **7882** | **UDP** | **通话音视频(最容易漏!漏了 = 通话没声音没画面)** |
+| 80 | TCP | HTTPS certificate issuance |
+| 443 | TCP + UDP | Web and encrypted traffic |
+| 7881 | TCP | Call fallback channel (skip if calls off) |
+| **7882** | **UDP** | **Call audio/video (easiest to forget! Missing this = no sound/picture)** |
 
-> 📌 有的服务商没有"安全组"这一层设置,那这步直接跳过——脚本会自动配置系统防火墙。
+> 📌 No "security group" layer at your provider? Skip this — the script configures the system firewall automatically.
 
-## 第 3 步:连接你的服务器(约 1 分钟)
+---
 
-打开终端:
+## Step 3 — Connect to your server (~1 minute)
 
-- **Mac**:启动台搜索「终端 / Terminal」
-- **Windows 10/11**:开始菜单搜索「PowerShell」
-
-输入(IP 换成你的服务器 IP),回车后输入服务器密码——**输密码时屏幕不显示任何字符是正常的**,输完回车:
+Open a terminal (macOS: "Terminal"; Windows: "PowerShell"), run the following (replace the IP), and enter your server password when prompted (**the screen shows no characters while typing the password — that's normal**):
 
 ```bash
-ssh root@你的服务器IP
+ssh root@YOUR_SERVER_IP
 ```
 
-第一次连接会问 `Are you sure you want to continue connecting?`,输 `yes` 回车。
+On the first connection, answer `yes` to the fingerprint prompt.
 
-> 📌 服务器密码在服务商控制台查看/重置。有的服务商默认用户不是 root(比如 `ubuntu`),就写 `ssh ubuntu@IP`,脚本会自动提权。
+> 📌 If the default user isn't root (e.g. `ubuntu`), use `ssh ubuntu@IP` — the script elevates automatically.
 
-## 第 4 步:运行安装命令(约 5-10 分钟,全自动)
+---
 
-连上服务器后,把下面三行**整体复制**粘贴进终端,回车:
+## Step 4 — Run the installer (~5–10 minutes, fully automated)
 
-```bash
-sudo apt-get update && sudo apt-get install -y wget
-wget -O matrix.sh https://raw.githubusercontent.com/VeilXofficial/veilx_matrix_ocs/main/matrix-installer.sh
-sudo bash matrix.sh
-```
-
-tuwunel版：
-本版基于 **tuwunel**（Rust 引擎，内置数据库、**免 PostgreSQL**）：更省资源、更稳、**能像 Telegram 一样发大文件/大图/长视频**
-**强烈推荐部署此版本，此版本支持元数据定期销毁，支持CDN，支持管理后台，支持盾机（开发中）**
+Once connected, **copy the whole line** and paste it into the terminal:
 
 ```bash
 sudo apt-get update && sudo apt-get install -y wget && wget -O tuwunel.sh https://raw.githubusercontent.com/VeilXofficial/veilx_matrix_ocs/main/matrix-tuwunel-installer.sh && sudo bash tuwunel.sh
 ```
 
-> 📌 第一行是基础准备:刷新系统软件列表并装好下载工具(系统里已有就自动跳过,重复执行无害)。后面装 Docker、防火墙等所有系统准备,脚本会自己完成,不用你操心。
+Follow the wizard. It asks **6 options + a CDN question**; each is explained on screen, so if in doubt, just press Enter (defaults are the safest combination):
 
-接下来跟着**中文向导**走:
+| Option | Enter (recommended) | Notes |
+|---|---|---|
+| 1 Who can register | **Invite code required** | Only people with your code can register; the first registrant becomes admin. (Or fully open — not for business use.) |
+| 2 Federation | **Off** | Island mode: outsiders can't message your members; smallest attack surface. |
+| 3 Voice/video calls | **Off first** | Needs two extra DNS records (`livekit`/`matrix-rtc`) and ports 7881/7882; get chat + files stable first. |
+| 4 Web client | **On** | Members open `https://your-domain` to register/log in — no app needed. |
+| 5 Web admin panel | **On** | A graphical admin panel (Ketesa) at `admin.your-domain`. |
+| 6 Max file size | **4 GB** | Set anything (e.g. 10 GB); larger uses more disk. |
+| ＋ Behind Cloudflare/CDN? | **No** | Answer yes only if you use a CDN (relaxes the DNS check); `matrix` must still be grey-cloud. |
 
-1. 向导问你的**域名** → 直接输入(如 `mychat.org`),填错会重新问,不会退出
-2. 向导问 **3 个安装选项** —— 每个选项屏幕上都有"作用 / 好处 / 风险"的大白话说明,看不懂就一路回车(推荐值即商业保密最安全组合):
+> 🔒 **Automatically enabled (not asked — active as soon as it's installed):** ① new rooms are **forced to end-to-end encryption** ② **metadata minimisation** (real IP not stored, redactions permanent, presence off, IP-free logging) ③ **Element X self-registration** (native OIDC; registration still requires an invite code). To disable the metadata hardening: `PRIVACY=0 sudo -E tuwunel config`.
+> 🤖 **Fully unattended:** `REG_MODE=token ENABLE_CALLS=1 ENABLE_ADMIN=1 sudo -E bash tuwunel.sh mychat.org`
 
-   | 选项 | 直接回车(推荐) | 好处 | 其他选择及风险 |
-   |---|---|---|---|
-   | 注册方式 | **关闭注册** | 外人连注册入口都没有;员工账号由管理员统一发放,离职即删 | 邀请码注册(码泄露=陌生人可进);完全开放(垃圾账号灌爆,商用勿选) |
-   | 语音视频通话 | **开启** | 团队开会不再依赖腾讯会议/Zoom,会议内容不出你的服务器 | 关闭:适合 1GB 小内存机器,DNS 也只需前 3 条记录(`@` / `matrix` / `admin`) |
-   | 联邦互通 | **关闭** | 服务器成为孤岛,外部任何人无法向成员发消息,零骚扰零钓鱼 | 开启:可与 matrix.org 等外部用户互聊,但暴露面变大 |
+Then it runs automatically: check DNS → install Docker → tune system → firewall → generate config → start services → obtain HTTPS certificate → **auto-create the admin and print the account/password**.
 
-3. 向导列出第 1、2 步的检查清单 → 确认做过了就按回车
-4. 之后全自动:检测 DNS(没生效自动等)→ 装 Docker → 生成所有密码密钥 → 启动服务(含网页管理后台)→ 申请 HTTPS 证书 → 创建管理员
-
-> 🤖 进阶:想跳过询问全自动安装?用环境变量预设,例如
-> `REG_MODE=token ENABLE_CALLS=1 ENABLE_FEDERATION=0 sudo -E bash matrix.sh mychat.org`
-
-看到这个就是成功:
+Success looks like this:
 
 ```
 ========================================================
- 🎉 部署完成!  mychat.org
+ 🎉 tuwunel deployed!  mychat.org
+ (registration[token] · federation[off] · calls[off] · web[on] · admin[on] · phone-signup[on] · big-files[4G] · engine tuwunel/Rust, no Postgres)
 
- 手机装 Element X,登录:
-   服务器:  mychat.org
-   账号:    admin
-   密码:    xxxxxxxxxxxx
+ Member sign-up / login
+   Web (recommended): open https://mychat.org to register & log in
+   Phone app: install Element X → enter server "mychat.org" → register (invite code) or log in
 
- 网页管理后台(admin.etke.cc 同款,自托管在你服务器上):
-   打开 https://admin.mychat.org
-   ① 浏览器先弹密码框 → 输 admin / 网页门禁密码
-   ② 再用管理员 admin / 上面的密码 登录
+ Admin (auto-created)
+   account: admin    password: xxxxxxxxxxxx
+   Web admin panel: https://admin.mychat.org  (log in with the admin account above)
+
+ Daily management:  sudo tuwunel   (menu)    sudo tuwunel adduser   (add a member)
 ========================================================
 ```
 
-> 🔑 **把账号密码 + 网页门禁密码都抄下来!** 全部永久保存在服务器 `/opt/matrix/CREDENTIALS.txt`(随时 `cat /opt/matrix/CREDENTIALS.txt` 查看)。
-> ⚠️ 如果结尾显示"部分完成",按屏幕中文提示处理;脚本可放心重复运行,不会弄坏已装好的部分。
-
-## 第 5 步:手机 / 电脑登录使用
-
-1. 安装客户端(推荐 **Element 系列**,Matrix 官方出品,全平台覆盖):
-
-   | 设备 | 客户端 | 下载 |
-   |---|---|---|
-   | iPhone / iPad | **Element X** | [App Store](https://apps.apple.com/app/element-x/id1631335820) |
-   | Android | **Element X** | [Google Play](https://play.google.com/store/apps/details?id=io.element.android.x) |
-   | Windows / Mac / Linux | **Element Desktop** | [element.io/download](https://element.io/download) |
-   | 浏览器(免安装) | **Element Web** | [app.element.io](https://app.element.io) |
-2. 登录:
-   - **服务器地址**:填你的域名(如 `mychat.org`,**不是** matrix.mychat.org)
-   - **账号 / 密码**:安装完成时显示的 `admin` 和密码
-3. 用起来:➕ 建房间拉人 = 群聊;房间里 📞 / 🎥 = 语音/视频通话;📎 = 发图片视频文件
+> 🔑 **Write down the admin account/password + invite code!** They're all stored on the server in `/opt/tuwunel/CREDENTIALS.txt` (`cat /opt/tuwunel/CREDENTIALS.txt`).
+> ⚠️ "Not ready yet" at the end usually means the cloud firewall isn't allowing 80/443, or DNS hasn't propagated globally. Caddy retries the certificate automatically — no reinstall needed.
 
 ---
 
-## 👥 管理团队:网页后台(推荐,零终端)
+## Step 5 — Log in from phone / desktop
 
-安装时会自动部署一个**自托管的网页管理后台**——数据不经任何第三方。**不用记命令、不用连服务器**,浏览器点鼠标就能管:建号 / 改密 / 封禁 / 建群 / 删消息 / 清媒体 / 发注册邀请码。
+| Device | Client | Download |
+|---|---|---|
+| iPhone / iPad | **Element X** | [App Store](https://apps.apple.com/app/element-x/id1631335820) |
+| Android | **Element X** | [Google Play](https://play.google.com/store/apps/details?id=io.element.android.x) |
+| Windows / macOS / Linux | **Element Desktop** | [element.io/download](https://element.io/download) |
+| Browser (no install) | Your **own web client** | Open `https://your-domain` |
 
-**怎么进**(浏览器打开即可):
+**Log in with the server = your domain** (e.g. `mychat.org`, **not** `matrix.mychat.org`); use the account/password shown at the end of the install.
 
-1. 访问 `https://admin.你的域名`
-2. 浏览器先弹一个密码框(网页门禁)→ 用户名 `admin`,密码填**网页门禁密码**
-3. 进去后再用**管理员账号** `admin` + 管理员密码登录
+> ⚠️ **Can't connect / Element X says "couldn't connect to this homeserver"? First thing to check: is your phone's date & time correct?**
+> A wrong phone clock → the HTTPS certificate fails validation → you simply can't connect (very common, especially on Android).
+> Fix: phone **Settings → Date & Time → turn on "Set automatically"**, then retry.
 
-> 🔑 两个密码都在服务器 `/opt/matrix/CREDENTIALS.txt` 里(部署完成卡片也打印了)。
-> 🔒 **为什么要输两次密码?** 第一道"网页门禁"是独立的锁,把管理后台挡在公网扫描之外;管理 API 从不对外裸奔。两把独立的锁,专为敏感场景设计。
-> 📌 打不开?多半是没给 `admin.你的域名` 加 DNS 记录(第 1 步),补上后等几分钟 Caddy 自动签好证书即可。
+---
 
-**命令行方式**(可选,适合习惯终端的人):
+## 👥 How members join (pick one)
+
+1. **Admin creates the account (most controlled):** `sudo tuwunel adduser` creates a user and sets a password in one command; send them "domain + username + password". The invite code never leaves your hands.
+2. **Give out an invite code, web self-registration:** send the invite code (in `CREDENTIALS.txt`) + `https://your-domain`; members register themselves in a browser.
+3. **Give out an invite code, Element X self-registration:** members install Element X → enter your domain → create account → enter the invite code.
+
+---
+
+## 🖥️ Graphical admin panel (Ketesa, recommended)
+
+If enabled (option 5), the installer deploys a **graphical web admin panel** — manage everything with a mouse, no commands.
+
+**How to open:** browse to `https://admin.your-domain` → **log in directly with the admin account `admin` + password** (no separate gate password; the panel is locked to your server).
+
+**What you can do:** manage users (create/deactivate/reset password), **issue and revoke invite codes**, review rooms/media, room directory, scheduled tasks.
+
+> 📌 The "Reports / Reported users" pages may error or show empty — tuwunel doesn't implement that feature; this is **normal** and you'll rarely need it.
+> 📌 The panel needs tuwunel v1.8.1+ (the `:latest` image already has it). If panel login errors, run `cd /opt/tuwunel && docker compose pull tuwunel && docker compose up -d`.
+> 📌 Add the panel to an existing server later: `sudo tuwunel enable-admin` (add the `admin` DNS record first).
+
+---
+
+## 🔧 Day-to-day management: the menu
+
+After install, **running `sudo tuwunel` opens the Chinese/English management menu** — no commands to memorise:
 
 ```bash
-cd /opt/matrix && sudo bash matrix-installer.sh adduser
-```
-
-按提示输入新成员用户名、密码;问到 `Make admin` 时普通成员直接回车,管理员输 `yes`。然后把「你的域名 + 用户名 + 密码」发给成员登录即可。
-
-## 🔧 日常维护:管理菜单(SSH 到服务器后执行)
-
-装好之后,**再次运行脚本 = 打开中文管理菜单**,什么命令都不用记:
-
-```bash
-cd /opt/matrix && sudo bash matrix-installer.sh
+sudo tuwunel
 ```
 
 ```
 ┌──────────────────────────────────────────────┐
-│  Matrix 管理菜单   你的域名                   │
+│  tuwunel management menu   your-domain        │
 └──────────────────────────────────────────────┘
-  1) 查看运行状态          5) 升级到最新版本
-  2) 添加团队成员          6) 重启所有服务
-  3) 修改配置              7) 彻底卸载
-  4) 立即备份              0) 退出
+  1) Status                    6) Upgrade service images
+  2) Add a team member         7) Clean up disk
+  3) Change config             8) Restart all services
+  4) Enable/disable web admin  9) Update script + apply new features
+  5) Back up now              10) Uninstall completely
+  p) Privacy hardening / metadata cleanup
+  s) Redact plaintext credential file (anti-forensics)
+  b) Automatic scheduled encrypted backup
+  0) Exit
 ```
 
-> 🔄 **改配置不用重装**(菜单选 3):显示当前配置,重新问一遍 3 个选项(**直接回车 = 保持当前值**),改完自动重启生效。账号、密码、聊天记录、密钥全部保持不变。
-
-<details>
-<summary>不用菜单,想直接敲命令?(点开)</summary>
+Or use commands directly:
 
 ```bash
-cd /opt/matrix && docker compose ps                              # 服务状态(开通话 6 个 / 关通话 4 个,含管理后台)
-cd /opt/matrix && docker compose logs -f synapse                 # 看日志(Ctrl+C 退出)
-cd /opt/matrix && docker compose up -d                           # 重启
-cd /opt/matrix && docker compose pull && docker compose up -d    # 升级到最新版
-sudo bash matrix-installer.sh adduser                            # 加成员
-sudo bash matrix-installer.sh config                             # 改配置
-sudo bash matrix-installer.sh uninstall                          # 卸载
+sudo tuwunel adduser          # add a member
+sudo tuwunel config           # change config (Enter = keep; data/accounts untouched)
+sudo tuwunel update           # pull the latest script from GitHub & apply new features (data untouched)
+sudo tuwunel enable-admin     # add the web admin panel to an existing server
+sudo tuwunel enable-elementx  # enable Element X phone self-registration
+sudo tuwunel autobackup       # enable weekly automatic encrypted backups
+sudo tuwunel privacy          # privacy/metadata: see what can be removed, clear logs
+sudo tuwunel forget-secrets   # anti-forensics: redact plaintext password/invite code on disk
+sudo tuwunel uninstall        # uninstall
 ```
 
-</details>
+> 🔄 **Reconfigure without reinstalling** (menu 3): it re-asks the options, **Enter = keep the current value**, then restarts. Accounts, history and keys are all preserved.
 
-## 💾 备份(建议每周一次)
+---
 
-密钥和数据库丢了就**无法恢复**,定期打包下载到本地:
+## 🔒 Privacy / anti-forensics (this edition's focus)
+
+This system is built to protect confidential communication, and **minimises the traces left on the server by default**:
+
+- ✅ **Message content is end-to-end encrypted** — neither you (the operator) nor the hosting provider can read it. This is the one guarantee that holds regardless of how good or bad the server is.
+- ✅ **Metadata minimisation (on by default):** real client IP never stored (`ip_source`), **redactions are truly permanent** (no 60-day retention of the original), presence off, log level too low to record IPs, tightened profile/room-directory exposure.
+- ✅ **Anti-forensic tools:** `sudo tuwunel forget-secrets` redacts the plaintext password/invite code on disk; `sudo tuwunel autobackup` produces AES-256-encrypted backups.
+
+**The honest limits (state these to clients — do not over-promise):**
+
+- ❌ **Metadata that cannot be removed:** room membership, event timeline, account existence, room names / file names — the server must keep these to function. E2EE protects *content*, **not metadata** (who talks to whom, when, room names, file names).
+- ❌ **If the disk is physically seized / imaged:** on an ordinary VPS the data is written to disk in plaintext and metadata can be extracted by forensics. Defending this layer requires a trusted provider/jurisdiction, or advanced full-disk encryption / a front "shield" proxy (not automatic, needs engineering effort).
+- ❌ **Hiding the server IP via Cloudflare doesn't really work** (certificate-transparency logs and grey-cloud subdomains leak it). Truly hiding the IP needs a self-hosted WireGuard front proxy.
+
+> Accurate wording for clients: **"Message content and attachments are end-to-end encrypted; the operator cannot read them. The server retains communication metadata (who is in which room, when, file names, room names), which could be extracted if the server is physically seized."**
+
+---
+
+## 💾 Backups (strongly recommended)
+
+Lose the database or keys and there is **no recovery**. This edition has no PostgreSQL — a backup is simply an archive of `data/tuwunel` (database + media) + `tuwunel.toml` + `.env`.
+
+**Recommended: turn on automatic encrypted backups** (weekly, AES-256, auto-rotated, skipped automatically if the disk is nearly full):
 
 ```bash
-# ① 在服务器上打包
-cd /opt/matrix
-docker compose exec -T postgres pg_dump -U synapse synapse | gzip > db-backup.sql.gz
-tar czf matrix-backup-$(date +%F).tar.gz .env CREDENTIALS.txt db-backup.sql.gz \
-    data/synapse/*.signing.key data/synapse/homeserver.yaml
-
-# ② 在你自己电脑的终端执行:下载备份
-scp root@你的服务器IP:/opt/matrix/matrix-backup-*.tar.gz ~/Desktop/
+sudo tuwunel autobackup     # set folder / retention / frequency; it prints the key — save it in a password manager
 ```
 
-聊天里的图片视频在 `data/synapse/media_store/`,体积较大,按需另行备份。
+**Or back up now** (menu option 5; you can set an encryption passphrase).
 
-## ❓ 常见问题
+**Download to your computer** (run on your own machine):
 
-| 问题 | 原因与解决 |
+```bash
+scp root@YOUR_SERVER_IP:/opt/tuwunel/backups/*.enc ~/Desktop/
+```
+
+> 🔑 **Save the backup key.** Without it, an encrypted backup can never be opened. The key lives only on the server — if the server is gone and you didn't save the key, the backups are useless.
+> 💡 The local `backups/` folder dies with the server. Copy the `.enc` files elsewhere regularly, or point the backup folder at a mounted external volume / object storage.
+
+---
+
+## ❓ FAQ
+
+| Problem | Cause & fix |
 |---|---|
-| 粘贴命令报 `wget: command not found` 或 `sudo 不是内部命令` | 命令贴错地方了——要先完成**第 3 步 `ssh` 连上服务器**,在服务器的终端里粘贴,不是在自己电脑本地 |
-| 登录提示"这不是 Matrix 服务器" | HTTPS 证书还没就绪。多等几分钟;确认第 1 步 5 条解析都指对了 IP,再 `cd /opt/matrix && docker compose restart caddy` |
-| 网页后台 `admin.你的域名` 打不开 | 多半是没加 `admin` 那条 DNS 记录,或证书还没签好;补记录、等几分钟。忘了门禁密码就 `cat /opt/matrix/CREDENTIALS.txt` |
-| 通话能接通,但没声音没画面 | 99% 是第 2 步的 **7882/UDP** 没放行,去服务商安全组补上 |
-| 安装时一直"DNS 还没生效" | 检查解析:类型是不是 **A**、主机记录是不是只填**前缀**、IP 有没有抄错 |
-| 忘记 admin 密码 | `cat /opt/matrix/CREDENTIALS.txt`;或重跑 adduser 建个新管理员 |
-| 装完想改主意(开/关通话、改注册方式、开联邦) | 不用重装:`cd /opt/matrix && sudo bash matrix-installer.sh config`,回车=保持,数据账号全不动 |
-| 加密房间老消息"无法解密" | 正常:新设备没有历史密钥。在旧设备上对新设备做"验证会话"即可 |
-| 想彻底卸载 / 重装 | 运行 `cd /opt/matrix && sudo bash matrix-installer.sh uninstall`(会先提示备份,双重确认后才删除);重装 = 卸载后重跑安装命令 |
+| **Phone Element X can't connect / "couldn't connect to this homeserver"** | **First, check the phone's date & time** (Settings → Date & Time → "Set automatically") — a wrong clock fails certificate validation; this is the most common cause (especially on Android). Then: try another network, confirm you can open `https://your-domain/.well-known/matrix/client` in the phone browser, and update Element X. |
+| **Element X says "needs to be upgraded to support authentication"** | That refers to registration. Confirm phone sign-up is on (`sudo tuwunel enable-elementx`) and tuwunel is up to date (`docker compose pull tuwunel`). Or register via web / `adduser` and have members **log in with a password** in Element X. |
+| **Large files won't upload** | Check the size limit (`MAX_UPLOAD=10G sudo -E tuwunel config`); if using Cloudflare, the **`matrix` host must be grey-cloud** (the orange-cloud 100 MB cap kills large files). |
+| **Admin panel `admin.domain` won't open / login errors** | Usually the `admin` DNS record is missing or the certificate isn't ready — add it and wait a few minutes. For login errors, `cd /opt/tuwunel && docker compose pull tuwunel && docker compose up -d`. |
+| Forgot the admin password | `cat /opt/tuwunel/CREDENTIALS.txt`; or `sudo tuwunel adduser` to create a new admin. |
+| Want to change config (calls, registration, file size, admin) | No reinstall: `sudo tuwunel config` — Enter keeps values, data/accounts untouched. |
+| Calls connect but no sound/picture | 99% of the time port **7882/UDP** isn't allowed — add it in the provider's firewall. |
+| Disk filling up | Menu option 7 "Clean up disk"; heavy large-file users should provision a large volume or object storage. |
+| "Unable to decrypt" old messages in an encrypted room | Normal: a new device has no historical keys. Verify the new session from an old device. |
+| Uninstall / reinstall | `sudo tuwunel uninstall` (double confirmation before deleting); reinstall = uninstall, then re-run the install command. |
 
-## 📦 仓库内容
+---
+
+## 📦 Server-side components
+
+Once installed, these run — all orchestrated with Docker, open-source and auditable:
 
 ```
-├── README.md              本说明文档
-└── matrix-installer.sh    一键安装脚本(全部逻辑都在这一个文件里,可自行审计)
+Caddy (automatic HTTPS) + tuwunel (Rust, embedded RocksDB, no PostgreSQL)
+  + Element Web (your own web client, optional)
+  + Ketesa (graphical admin panel, optional)
+  + LiveKit + lk-jwt-service (calls, optional)
 ```
 
-**装好后的服务端组件**:Caddy(自动 HTTPS)+ Synapse + PostgreSQL + Ketesa(网页管理后台)+ LiveKit + lk-jwt-service,全部 Docker 编排,开源可审计。
+Install directory `/opt/tuwunel`. All logic lives in the single script `matrix-tuwunel-installer.sh`, which you can audit yourself.
 
-## 📄 许可(注意:禁止商用)
+---
 
-本项目采用 [PolyForm Noncommercial 1.0.0](LICENSE) 许可:
+## 🆚 tuwunel vs Synapse edition
 
-- ✅ **个人 / 团队内部 / 学习研究 / 公益组织使用:免费**,可自由修改分发(保留版权声明)
-- ❌ **商业用途一律禁止**(把它卖钱、集成进商业产品、用它提供收费服务等)
-- 🚫 **特别声明:禁止在淘宝、闲鱼(咸鱼)、拼多多、京东、抖音/快手小店、微店、转转等一切电商及二手平台售卖本项目;禁止收费代装、代部署、捆绑倒卖等类似牟利行为** —— 本项目免费,在任何平台看到有人卖就是倒卖,欢迎举报
-- 💼 想正规商用?联系作者获取商业授权:在本仓库提 [Issue](../../issues) 即可
+The repository also ships a Synapse edition (`matrix-installer.sh`). In short:
 
-欢迎 Star ⭐
+- **tuwunel edition (this document):** Rust, no PostgreSQL, **more efficient, stronger large-file support**, 2 GB serves ~300 people. Best for most teams, especially heavy large-file use.
+- **Synapse edition:** Python + PostgreSQL, the most mature ecosystem and admin tooling, but heavier on RAM and weaker on large files.
+
+**New deployments: the tuwunel edition is recommended.**
+
+---
+
+## 📄 Licence (note: non-commercial only)
+
+This project is licensed under [PolyForm Noncommercial 1.0.0](LICENSE):
+
+- ✅ **Free for personal / internal team / research / non-profit use** — modify and redistribute freely (keep the copyright notice)
+- ❌ **All commercial use is prohibited** (selling it, bundling it into a commercial product, offering it as a paid service, etc.)
+- 🚫 **Reselling on any marketplace, or paid "installation/deployment" services, are prohibited** — this project is free; if you see someone selling it, that's unauthorised resale
+- 💼 Want a proper commercial licence? Open an [Issue](../../issues) to contact the author.
+
+Star ⭐ if you find it useful.
 
 ---
 
 <div align="center">
-用 ❤️ 打造 · 让每个人都能拥有自己的私密通讯服务器
+Built with ❤️ · so everyone can own their private communication server
 </div>
