@@ -8,7 +8,7 @@ Powered by **tuwunel** (Rust engine, embedded database, **no PostgreSQL**): ligh
 
 Recommended client: **Element X**. A dedicated **VeilX** client is in development (cleaner, easier, more features, open-source and auditable; operations team based in the UK, Singapore and Japan). Client files, contracts, internal discussions, voice & video meetings — all of it lives only on your own server. Built on the open [Matrix](https://matrix.org) protocol. Source is public and auditable (free for non-commercial use).
 
-**English** · [日本語](docs/README.ja.md) · [한국어](docs/README.ko.md) · [Русский](docs/README.ru.md) · [Français](docs/README.fr.md) · [Deutsch](docs/README.de.md) · [Italiano](docs/README.it.md) · [Español](docs/README.es.md) · [Bahasa Melayu](docs/README.ms.md) · [فارسی](docs/README.fa.md)· [简体中文](docs/README.zh-CN.md) · [繁體中文](docs/README.zh-TW.md) · [粵語](docs/README.zh-HK.md) 
+**English** · [日本語](docs/README.ja.md) · [한국어](docs/README.ko.md) · [Русский](docs/README.ru.md) · [Français](docs/README.fr.md) · [Deutsch](docs/README.de.md) · [Italiano](docs/README.it.md) · [Español](docs/README.es.md) · [Bahasa Melayu](docs/README.ms.md) · [فارسی](docs/README.fa.md) · [简体中文](docs/README.zh-CN.md) · [繁體中文](docs/README.zh-TW.md) · [粵語](docs/README.zh-HK.md)
 
 </div>
 
