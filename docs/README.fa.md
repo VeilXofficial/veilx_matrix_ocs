@@ -12,7 +12,7 @@
 
 کلاینت پیشنهادی: **Element X**. کلاینت اختصاصی **VeilX** در حال توسعه است (تمیزتر، ساده‌تر، با امکانات بیشتر؛ متن‌باز و قابل ممیزی؛ تیم عملیات در بریتانیا، سنگاپور و ژاپن). پرونده‌های مشتریان، قراردادها، بحث‌های داخلی، جلسات صوتی و تصویری — همه فقط روی سرور خودتان باقی می‌مانند. مبتنی بر پروتکل باز [Matrix](https://matrix.org). کد منبع عمومی و قابل ممیزی (برای استفادهٔ غیرتجاری رایگان).
 
-[English](../README.md) · [简体中文](README.zh-CN.md) · [繁體中文](README.zh-TW.md) · [粵語](README.zh-HK.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Русский](README.ru.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [Italiano](README.it.md) · [Español](README.es.md) · [Bahasa Melayu](README.ms.md) · **فارسی**
+[English](../README.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Русский](README.ru.md) · [Français](README.fr.md) · **Deutsch** · [Italiano](README.it.md) · [Español](README.es.md) · [Bahasa Melayu](README.ms.md) · [فارسی](README.fa.md)· [简体中文](README.zh-CN.md) · [繁體中文](README.zh-TW.md) · [粵語](README.zh-HK.md)  **فارسی**
 
 ---
 
