@@ -594,14 +594,21 @@ px_write_config() {
   [ -n "$dom" ] && [ -n "$pbk_priv" ] || return 1
   port="$(px_port)"; flow="$(px_flow)"; dest="$(px_dest)"
 
-  # clients 数组
-  local cl="" uuid label rest first=1 flowfield=""
+  # clients 数组。
+  # 两个必须去重的点:
+  #  · email 必须唯一 —— 重复会让 xray 直接拒绝启动
+  #    ("failed to initiate user > proxy/vless: User X already exists")
+  #    所以在备注后面缀上 UUID 前 8 位,既唯一又能看出是谁。
+  #  · UUID 本身也去重,防止同一台设备被加了两次。
+  local cl="" uuid label rest first=1 flowfield="" seen=""
   [ -n "$flow" ] && flowfield="\"flow\":\"$flow\","
   while IFS="$(printf '\t')" read -r uuid label rest; do
     [ -n "$uuid" ] || continue
     case "$uuid" in \#*) continue;; esac
+    case " $seen " in *" $uuid "*) continue;; esac   # 同一 UUID 只保留一次
+    seen="$seen $uuid"
     [ $first -eq 1 ] || cl="$cl,"
-    cl="$cl{\"id\":\"$uuid\",$flowfield\"email\":\"$(json_esc "${label:-client}")\"}"
+    cl="$cl{\"id\":\"$uuid\",$flowfield\"email\":\"$(json_esc "${label:-client}-${uuid%%-*}")\"}"
     first=0
   done < "$(px_clients)"
 
@@ -1042,6 +1049,13 @@ px_add_client() {
     elif [ -e /dev/tty ]; then read -rp "$p" label < /dev/tty || true; fi
   fi
   label="$(printf '%s' "${label:-device}" | tr -d '\t\n')"
+  # 备注重名会让列表分不清谁是谁(email 唯一性由 px_write_config 保证),
+  # 这里自动加序号,体验上更清楚。
+  if [ -f "$(px_clients)" ] && cut -f2 "$(px_clients)" 2>/dev/null | grep -qxF "$label"; then
+    local _i=2
+    while cut -f2 "$(px_clients)" 2>/dev/null | grep -qxF "$label-$_i"; do _i=$((_i+1)); done
+    label="$label-$_i"
+  fi
   # 允许指定 UUID(第二个参数或交互输入);留空则自动生成
   local uuid="${2:-}"
   if [ -z "$uuid" ] && [ -t 0 ]; then
@@ -1161,7 +1175,14 @@ px_enable() {
   echo "$(L "  Roll back any time:              sudo tuwunel proxy disable" "  随时回滚:                        sudo tuwunel proxy disable")"
   # 直接把第一台设备的链接+二维码打出来:用户装完就能扫,
   # 不用再回菜单找「添加设备」。第二个参数留空=自动生成 UUID。
-  px_add_client "$(L "my phone" "我的手机")" ""
+  # 只有在一个客户端都没有时才自动创建 —— 否则重跑向导会不断堆叠设备。
+  if [ -s "$(px_clients)" ]; then
+    echo
+    ok "$(L "Existing devices kept — nothing new was created." "已保留原有设备 —— 没有新建。")"
+    px_list
+  else
+    px_add_client "$(L "my phone" "我的手机")" ""
+  fi
   cat <<EOF
 
 $(L "── What to do next ──" "── 接下来怎么做 ──")
@@ -1203,21 +1224,23 @@ px_apply_compose() {
   [ -f "$f" ] || return 1
   [ -f "$f.bak-preproxy" ] || cp -a "$f" "$f.bak-preproxy"
 
+  # 不用 `trap ... RETURN`:RETURN 触发时函数的 local 变量已经不在作用域里,
+  # 在 set -u 下会炸成 "work: unbound variable"。改成每个出口显式清理。
   local work="$f.veilxwork$$" tmp="$f.veilxtmp$$"
-  trap 'rm -f "$work" "$tmp"' RETURN
-  cp -a "$f" "$work" || return 1
+  px_cleanup_tmp() { rm -f "$work" "$tmp" 2>/dev/null || true; }
+  cp -a "$f" "$work" || { px_cleanup_tmp; return 1; }
 
   # 先移除脚本上次注入的 xray 段(幂等)
-  sed -i '/# >>> veilx-proxy >>>/,/# <<< veilx-proxy <<</d' "$work" || return 1
+  sed -i '/# >>> veilx-proxy >>>/,/# <<< veilx-proxy <<</d' "$work" || { px_cleanup_tmp; return 1; }
 
   if px_enabled; then
     local pport; pport="$(px_port)"
     if [ "$pport" = "443" ]; then
       # Caddy 让出宿主机 443(容器内仍监听 443,Xray 通过内网 caddy:443 转发)
-      sed -i 's|^\( *\)ports: \["80:80", "443:443", "443:443/udp"\]|\1ports: ["80:80"]   # veilx-proxy: 443 交给 xray|' "$work" || return 1
+      sed -i 's|^\( *\)ports: \["80:80", "443:443", "443:443/udp"\]|\1ports: ["80:80"]   # veilx-proxy: 443 交给 xray|' "$work" || { px_cleanup_tmp; return 1; }
     else
       # 非 443:完全不动 Caddy,若之前被改过则还原
-      sed -i 's|^\( *\)ports: \["80:80"\] *# veilx-proxy.*|\1ports: ["80:80", "443:443", "443:443/udp"]|' "$work" || return 1
+      sed -i 's|^\( *\)ports: \["80:80"\] *# veilx-proxy.*|\1ports: ["80:80", "443:443", "443:443/udp"]|' "$work" || { px_cleanup_tmp; return 1; }
     fi
     # 在 networks: 段之前插入 xray 服务
     awk -v pport="$pport" -v img="$XRAY_IMAGE" '
@@ -1244,22 +1267,23 @@ px_apply_compose() {
         done=1
       }
       { print }
-    ' "$work" > "$tmp" && mv "$tmp" "$work" || return 1
+    ' "$work" > "$tmp" && mv "$tmp" "$work" || { px_cleanup_tmp; return 1; }
 
     # 校验:xray 段确实注入了,且必须有人监听宿主机 443(Caddy 或 xray),
     # 否则拒绝写回 —— 宁可不开代理,也不能把整站打没。
     grep -q '# >>> veilx-proxy >>>' "$work" || {
-      warn "$(L "xray block was not injected — refusing to write docker-compose.yml" "xray 段未能注入 —— 拒绝写回 docker-compose.yml")"; return 1; }
+      warn "$(L "xray block was not injected — refusing to write docker-compose.yml" "xray 段未能注入 —— 拒绝写回 docker-compose.yml")"; px_cleanup_tmp; return 1; }
     if ! grep -qE '"443:443"|"443:443/tcp"' "$work"; then
       warn "$(L "Nothing would listen on host :443 — refusing to write docker-compose.yml" "没有任何服务会监听宿主机 :443 —— 拒绝写回 docker-compose.yml")"
-      return 1
+      px_cleanup_tmp; return 1
     fi
   else
     # 还原 caddy 端口
-    sed -i 's|^\( *\)ports: \["80:80"\] *# veilx-proxy.*|\1ports: ["80:80", "443:443", "443:443/udp"]|' "$work" || return 1
+    sed -i 's|^\( *\)ports: \["80:80"\] *# veilx-proxy.*|\1ports: ["80:80", "443:443", "443:443/udp"]|' "$work" || { px_cleanup_tmp; return 1; }
   fi
 
-  cat "$work" > "$f" || return 1
+  cat "$work" > "$f" || { px_cleanup_tmp; return 1; }
+  px_cleanup_tmp
   return 0
 }
 
