@@ -653,7 +653,10 @@ px_write_config() {
   ]
 }
 EOF
-  chmod 600 "$d/config.json" 2>/dev/null || true
+  # 官方 xray 镜像以非 root(uid 65532)运行,600 的 root 属主文件它读不了,
+  # 容器会直接起不来。所以配置文件必须可被容器读取(644);私钥的保护靠
+  # 外层目录 700(px_enable 里设置),宿主机上其它用户仍进不来。
+  chmod 644 "$d/config.json" 2>/dev/null || true
 }
 
 # 生成 veilx:// 链接(标准 REALITY 参数,客户端内部还原成标准 vless://)
@@ -849,7 +852,7 @@ px_config() {
 
   # ---- 借用目标 ----
   echo
-  echo "$(L "Which real site should REALITY borrow? Probes that aren't VeilX clients get forwarded there." "REALITY 借用哪个真实网站?非 VeilX 客户端的探测会被转发过去。")"
+  echo "$(L "Which real site should the proxy disguise itself as? Probes that aren't VeilX clients get forwarded there." "代理伪装成哪个真实网站?非 VeilX 客户端的探测会被转发过去。")"
   echo "  1) $(L "This server's own Matrix/Element site (recommended — the IP really does host it)" "本机真实的 Matrix/Element 站点(推荐 —— 这个 IP 确实托管它)")"
   echo "  2) $(L "An external site (e.g. www.microsoft.com:443)" "外部站点(如 www.microsoft.com:443)")"
   R="$(px_ask "$(L "Select [1-2, blank=keep]: " "请选择 [1-2,留空=不改]: ")")"
@@ -986,7 +989,7 @@ px_enable() {
     px_list; return 0
   fi
 
-  bold "$(L "Enabling the VeilX dedicated proxy (VLESS+Vision+REALITY)" "开启 VeilX 专用代理(VLESS+Vision+REALITY)")"
+  bold "$(L "Setting up the VeilX dedicated proxy" "开启 VeilX 专用代理")"
   if [ "$(px_port)" = "443" ]; then
     echo "$(L "  Xray will take over :443; Caddy keeps :80 (for cert renewal) and stays reachable internally." "  Xray 将接管 :443;Caddy 保留 :80(续证用)并继续在内网提供服务。")"
   else
@@ -1005,7 +1008,7 @@ px_enable() {
     kp="$(px_xray_run x25519)"
     priv="$(printf '%s\n' "$kp" | grep -iE 'private' | sed 's/.*: *//' | tr -d '\r')"
     pub="$(printf '%s\n' "$kp"  | grep -iE 'public'  | sed 's/.*: *//' | tr -d '\r')"
-    [ -n "$priv" ] && [ -n "$pub" ] || die "$(L "Failed to generate REALITY keys" "生成 REALITY 密钥失败")"
+    [ -n "$priv" ] && [ -n "$pub" ] || die "$(L "Failed to generate proxy keys" "生成代理密钥失败")"
     printf '%s\n' "$priv" > "$d/private.key"
     printf '%s\n' "$pub"  > "$d/public.key"
     chmod 600 "$d/private.key" "$d/public.key"
@@ -1020,11 +1023,20 @@ px_enable() {
   echo "$(L "  Restarting services…" "  正在重启服务…")"
   docker compose up -d --remove-orphans >/dev/null 2>&1 || warn "$(L "compose up reported an error — check: docker compose ps" "compose up 报错 —— 请查: docker compose ps")"
   sleep 3
-  if docker compose ps --status running -q xray 2>/dev/null | grep -q .; then
-    ok "$(L "VeilX proxy is running on :$(px_port) (REALITY, camouflaged as your Matrix site)." "VeilX 代理已在 :$(px_port) 运行(REALITY,伪装成你的 Matrix 站点)。")"
-  else
-    warn "$(L "xray did not come up: docker compose logs --tail 30 xray" "xray 没起来: docker compose logs --tail 30 xray")"
+  if ! docker compose ps --status running -q xray 2>/dev/null | grep -q .; then
+    # 起不来时直接把日志摆出来 —— 不懂网络的人不该被要求自己去敲 docker 命令。
+    # 也【不】发二维码:给一个连不上的节点只会让人白折腾半天。
+    echo
+    warn "$(L "The proxy did NOT start. Nothing was handed out — your Matrix site is untouched." "代理没能启动。没有生成任何节点 —— 你的 Matrix 网站不受影响。")"
+    echo
+    echo "$(L "── Log (last 20 lines) ──" "── 日志(最后 20 行)──")"
+    docker compose logs --tail 20 --no-log-prefix xray 2>&1 | sed 's/^/  /' || true
+    echo
+    echo "$(L "Send the lines above for help. To undo:  sudo tuwunel proxy disable" "把上面的内容发给我排查。撤销:  sudo tuwunel proxy disable")"
+    return 1
   fi
+
+  ok "$(L "VeilX proxy is running on :$(px_port)." "VeilX 代理已在 :$(px_port) 运行。")"
   # 端口非 443 时,curl https://域名 打的是 Caddy 而不是代理 —— 那样"验证通过"
   # 是假象,所以要显式带上代理端口。
   if [ "$(px_port)" = "443" ]; then
@@ -1100,7 +1112,11 @@ px_apply_compose() {
         print "  xray:"
         print "    image: " img
         print "    restart: unless-stopped"
-        print "    logging: *log"
+        # 不用 *log 锚点:万一目标 compose 没定义它,YAML 解析会整体失败,
+        # 连带把 Matrix 的所有容器一起弄down。这里写死等价配置,自包含。
+        print "    logging:"
+        print "      driver: json-file"
+        print "      options: { max-size: \"10m\", max-file: \"3\" }"
         print "    security_opt: [\"no-new-privileges:true\"]"
         print "    depends_on: [caddy]"
         print "    ports: [\"" pport ":" pport "/tcp\"]"
@@ -1416,7 +1432,7 @@ if [ "$RECONFIG" -eq 0 ] && [ -f "$INSTALL_DIR/CREDENTIALS.txt" ] \
   s) $(L "Wipe plaintext credentials file (anti-forensics: remove on-disk password/token)" "涂销明文凭据文件(抗取证:去掉磁盘上的明文密码/邀请码)")
   b) $(L "Scheduled encrypted backup (optional: weekly auto, with rotation/skip-if-full)" "自动定时加密备份(可选:开启后每周自动,含轮转/满盘跳过)")
   a) $(L "Change admin panel URL (admin. → another subdomain)" "修改后台网址(admin. → 别的子域)")
-  x) $(L "VeilX dedicated proxy (REALITY anti-censorship; link + QR for the app)" "VeilX 专用代理(REALITY 抗封锁;给 App 出链接+二维码)")$([ "$(env_saved ENABLE_PROXY)" = "1" ] && L "  [ON]" "  [已开启]")
+  x) $(L "VeilX dedicated proxy (anti-censorship; link + QR for the app)" "VeilX 专用代理(抗封锁;给 App 出链接+二维码)")$([ "$(env_saved ENABLE_PROXY)" = "1" ] && L "  [ON]" "  [已开启]")
   L) $(L "Switch interface language → 中文" "切换界面语言 → English")   (语言 / Language)
   0) $(L Exit 退出)
 EOF
