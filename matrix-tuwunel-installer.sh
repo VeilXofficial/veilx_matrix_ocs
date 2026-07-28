@@ -714,16 +714,116 @@ px_print_client() {
 px_ask() {
   local prompt="$1" ans=""
   if [ -t 0 ]; then
+    # 交互终端:提示走 stderr(stdout 要留给返回值)
     printf '%s' "$prompt" >&2
     IFS= read -r ans || ans=""
-  elif [ -e /dev/tty ]; then
+  elif [ -e /dev/tty ] && (exec </dev/tty) 2>/dev/null; then
+    # stdin 被重定向了(如 bash <(curl ...)),但仍有控制终端
     printf '%s' "$prompt" > /dev/tty 2>/dev/null || true
     IFS= read -r ans < /dev/tty || ans=""
+  else
+    # 完全非交互(管道/自动化):从 stdin 读一行,读不到就返回空走默认值
+    printf '%s' "$prompt" >&2
+    IFS= read -r ans || ans=""
   fi
   printf '%s' "$ans"
 }
 
-# 交互式设置:端口 / 目标网站 / SNI / flow / uTLS 指纹
+# 运行状态自检。用大白话说结论,不堆术语 —— 用户要的是
+# 「现在到底能不能用」,而不是一堆容器名和端口号。
+px_status() {
+  cd "$INSTALL_DIR" 2>/dev/null || return 1
+  local dom port running
+  dom="$(env_saved MATRIX_DOMAIN)"; port="$(px_port)"
+  printf '\n%s%s%s\n\n' "$C_B$C_CYAN" "$(L "== Status ==" "== 运行状态 ==")" "$C_RESET"
+
+  # 1) 代理本身
+  if docker compose ps --status running -q xray 2>/dev/null | grep -q .; then
+    ok "$(L "Proxy is running (port $port)" "代理正在运行(端口 $port)")"
+    running=1
+  else
+    warn "$(L "Proxy is NOT running" "代理没有在运行")"
+    echo "   $(L "See why:" "查看原因:") docker compose logs --tail 30 xray"
+    running=0
+  fi
+
+  # 2) 你的 Matrix 网站 —— 用户最关心的其实是这个
+  local code
+  code="$(curl -sk -o /dev/null -w '%{http_code}' --max-time 10 "https://$dom/" 2>/dev/null)"
+  case "$code" in
+    000|"") warn "$(L "Your Matrix site did NOT respond!" "你的 Matrix 网站没有响应!")"
+            if [ "$port" = "443" ]; then
+              echo "   $(L "The proxy shares port 443 with your site. Roll back with:" "代理和网站共用 443 端口。回滚:")"
+              echo "   sudo tuwunel proxy disable"
+            fi ;;
+    *)      ok "$(L "Your Matrix site is up (HTTP $code)" "你的 Matrix 网站正常(HTTP $code)")" ;;
+  esac
+
+  # 3) 设备数
+  local n=0
+  [ -f "$(px_clients)" ] && n="$(grep -c . "$(px_clients)" 2>/dev/null || echo 0)"
+  echo "   $(L "Devices added:" "已添加设备:") $n"
+  [ "$n" = "0" ] && echo "   $(L "Add one from the menu to get a QR code for your phone." "在菜单里添加一台,就能拿到手机扫的二维码。")"
+  echo
+}
+
+# ---------------------------------------------------------------------
+# 一键向导:面向不懂网络的用户。
+# 只问一个真正需要人决定的问题(用哪个端口),其余全部自动:
+# 密钥、UUID、shortId、借用目标(本机真站)、SNI、flow、uTLS 都用最优默认值。
+# ---------------------------------------------------------------------
+px_wizard() {
+  INSTALL_DIR="${INSTALL_DIR:-/opt/tuwunel}"
+  [ -d "$INSTALL_DIR" ] || die "$(L "$INSTALL_DIR not found — deploy the Matrix server first" "找不到 $INSTALL_DIR —— 请先部署 Matrix 服务器")"
+  cd "$INSTALL_DIR"
+  local dom; dom="$(env_saved MATRIX_DOMAIN)"
+  [ -n "$dom" ] || die "$(L "Can't read your domain from .env" "读不到 .env 里的域名")"
+
+  cat <<EOF
+
+┌────────────────────────────────────────────────────────┐
+│  $(L "Set up the VeilX proxy — guided" "VeilX 专用代理 · 一键向导")
+└────────────────────────────────────────────────────────┘
+
+$(L "This lets your phone reach this server even where it is blocked." "这能让你的手机在被封锁的网络里也能连上这台服务器。")
+$(L "It disguises itself as your own website — a probe sees the real site." "它会伪装成你自己的网站 —— 别人探测时看到的就是你真实的站点。")
+
+$(L "Everything is automatic (keys, IDs, camouflage target)." "密钥、账号、伪装目标等全部自动生成,你不用懂。")
+$(L "You only need to answer ONE question:" "你只需要回答一个问题:")
+
+EOF
+
+  cat <<EOF
+$(L "Which port should the proxy use?" "代理用哪个端口?")
+
+  1) $(L "8443  — SAFE. Your Matrix site is NOT touched at all." "8443  —— 【安全】完全不动你的 Matrix 网站。")
+     $(L "         Recommended for the first try." "         第一次用推荐选这个。")
+
+  2) $(L "443   — BEST disguise, but your site briefly restarts and" "443   —— 【伪装最好】但你的网站会短暂重启,")
+     $(L "         shares the port with the proxy." "         而且要和代理共用端口。")
+     $(L "         Only pick this once 8443 already works." "         建议先用 8443 跑通了再换成这个。")
+
+EOF
+  local R; R="$(px_ask "$(L "Select [1-2, default 1]: " "请选择 [1-2,直接回车=1]: ")")"
+  case "$R" in
+    2) px_env_set PROXY_PORT 443
+       echo; warn "$(L "Your website will restart briefly. If anything goes wrong, run: sudo tuwunel proxy disable" "你的网站会短暂重启。万一出问题,执行: sudo tuwunel proxy disable")" ;;
+    *) px_env_set PROXY_PORT 8443
+       echo; ok "$(L "Using 8443 — your Matrix site will not be affected." "使用 8443 —— 你的 Matrix 网站不受任何影响。")" ;;
+  esac
+
+  # 其余一律用最优默认值:借用本机真实站点(IP↔域名↔证书自洽,最难被识破)
+  px_env_set PROXY_DEST "caddy:443"
+  px_env_set PROXY_SNI  ""
+  px_env_set PROXY_FLOW "xtls-rprx-vision"
+  px_env_set PROXY_FP   "chrome"
+
+  echo
+  echo "$(L "Setting up… (first run downloads the proxy image, a minute or two)" "正在部署…(首次会下载代理镜像,需要一两分钟)")"
+  px_enable
+}
+
+# 交互式设置:端口 / 目标网站 / SNI / flow / uTLS 指纹(专家用)
 px_config() {
   [ -d "$INSTALL_DIR" ] || die "$(L "$INSTALL_DIR not found" "找不到 $INSTALL_DIR")"
   cd "$INSTALL_DIR"
@@ -933,7 +1033,19 @@ px_enable() {
     echo "$(L "  Verify camouflage from outside:  curl -I --resolve $dom:$(px_port):<server-ip> https://$dom:$(px_port)" "  从外部验证伪装:  curl -I --resolve $dom:$(px_port):<服务器IP> https://$dom:$(px_port)")"
   fi
   echo "$(L "  Roll back any time:              sudo tuwunel proxy disable" "  随时回滚:                        sudo tuwunel proxy disable")"
-  px_add_client "phone"
+  # 直接把第一台设备的链接+二维码打出来:用户装完就能扫,
+  # 不用再回菜单找「添加设备」。第二个参数留空=自动生成 UUID。
+  px_add_client "$(L "my phone" "我的手机")" ""
+  cat <<EOF
+
+$(L "── What to do next ──" "── 接下来怎么做 ──")
+$(L "1. Open VeilX on your phone" "1. 手机上打开 VeilX")
+$(L "2. Menu → 网络代理 → 扫码添加 VeilX 代理" "2. 侧边菜单 → 网络代理 → 扫码添加 VeilX 代理")
+$(L "3. Scan the QR code above, then turn on the 代理 switch" "3. 扫上面的二维码,然后打开「代理」开关")
+
+$(L "Add more devices:  sudo tuwunel proxy add" "再加设备:  sudo tuwunel proxy add")
+$(L "Check status:      sudo tuwunel proxy" "查看状态:  sudo tuwunel proxy")
+EOF
 }
 
 px_disable() {
@@ -1026,38 +1138,58 @@ menu_proxy() {
   [ -d "$INSTALL_DIR" ] || die "$(L "$INSTALL_DIR not found" "找不到 $INSTALL_DIR")"
   cd "$INSTALL_DIR"
   while :; do
-    local st
-    if px_enabled; then st="$(L "ON" "已开启")"; else st="$(L "OFF" "未开启")"; fi
-    cat <<EOF
+    # 未部署时只给一个入口:一键向导。菜单里堆满 SNI/flow/uTLS 这种词
+    # 只会让不懂网络的人不敢按,也更容易点错把站点搞挂。
+    if ! px_enabled; then
+      cat <<EOF
 
-┌──────────────────────────────────────────────┐
-│  $(L "VeilX dedicated proxy (REALITY)" "VeilX 专用代理(REALITY)")  [$st]
-└──────────────────────────────────────────────┘
-  1) $(L "Enable (camouflaged as your Matrix site)" "开启(伪装成你的 Matrix 站点)")
-  2) $(L "Add a client → prints a veilx:// link + QR" "添加客户端 → 输出 veilx:// 链接 + 二维码")
-  3) $(L "List clients" "查看客户端列表")
-  4) $(L "Show a client's link/QR again" "重新显示某个客户端的链接/二维码")
-  5) $(L "Settings (port / borrowed site / SNI / flow / uTLS)" "参数设置(端口 / 借用目标 / SNI / flow / uTLS)")
-  6) $(L "Disable (hand the port back to Caddy)" "关闭(把端口还给 Caddy)")
+┌────────────────────────────────────────────────────────┐
+│  $(L "VeilX dedicated proxy" "VeilX 专用代理")   [$(L "not set up" "尚未部署")]
+└────────────────────────────────────────────────────────┘
+  $(L "Lets your phone connect even from a censored network," "让你的手机在被封锁的网络里也能连上这台服务器,")
+  $(L "by disguising the connection as your own website." "方法是把连接伪装成你自己的网站。")
+
+  1) $(L "Set it up now (guided, one question)" "一键部署(向导,只问一个问题)")
   0) $(L Back 返回)
 EOF
-    local c=""
-    if [ -t 0 ]; then read -rp "$(L "Select [0-6]: " "请选择 [0-6]: ")" c || return 0
-    else read -rp "$(L "Select [0-6]: " "请选择 [0-6]: ")" c < /dev/tty 2>/dev/null || return 0; fi
+      local c0; c0="$(px_ask "$(L "Select [0-1]: " "请选择 [0-1]: ")")"
+      case "$c0" in
+        1) px_wizard ;;
+        *) return 0 ;;
+      esac
+      press_enter
+      continue
+    fi
+
+    local st port
+    st="$(L "ON" "运行中")"; port="$(px_port)"
+    cat <<EOF
+
+┌────────────────────────────────────────────────────────┐
+│  $(L "VeilX dedicated proxy" "VeilX 专用代理")   [$st · $(L "port" 端口) $port]
+└────────────────────────────────────────────────────────┘
+  1) $(L "Add a device → get its link + QR code" "添加设备 → 得到链接和二维码")
+  2) $(L "My devices" "我的设备列表")
+  3) $(L "Show a device's link/QR again" "重新显示某台设备的链接/二维码")
+  4) $(L "Check status" "检查运行状态")
+  5) $(L "Turn it off" "关闭代理")
+  9) $(L "Advanced settings (only if you know what you're doing)" "高级设置(不懂就别动)")
+  0) $(L Back 返回)
+EOF
+    local c; c="$(px_ask "$(L "Select: " "请选择: ")")"
     case "$c" in
-      1) px_enable ;;
-      2) px_add_client ;;
-      3) px_list ;;
-      4) px_list
+      1) px_add_client ;;
+      2) px_list ;;
+      3) px_list
          local n="" i=0 uuid label rest
-         if [ -t 0 ]; then read -rp "$(L "Which number? " "第几个? ")" n || true
-         else read -rp "$(L "Which number? " "第几个? ")" n < /dev/tty 2>/dev/null || true; fi
+         n="$(px_ask "$(L "Which number? " "第几个? ")")"
          while IFS="$(printf '\t')" read -r uuid label rest; do
            [ -n "$uuid" ] || continue; i=$((i+1))
            [ "$i" = "$n" ] && { px_print_client "$uuid" "${label:-device}"; break; }
          done < "$(px_clients)" ;;
-      5) px_config ;;
-      6) px_disable ;;
+      4) px_status ;;
+      5) px_disable ;;
+      9) px_config ;;
       0|"") return 0 ;;
       *) warn "$(L "Invalid choice" "无效选择")" ;;
     esac
@@ -1187,13 +1319,14 @@ if [ "${1:-}" = "disable-elementx" ]; then ENABLE_ELEMENTX=0; RECONFIG=1; set --
 if [ "${1:-}" = "proxy" ]; then
   INSTALL_DIR="${INSTALL_DIR:-/opt/tuwunel}"
   case "${2:-}" in
+    wizard|setup)    px_wizard ;;
     enable)          px_enable ;;
     disable)         px_disable ;;
     config|settings) px_config ;;
     add|add-client)  px_add_client "${3:-}" "${4:-}" ;;
     list)            px_list ;;
     "")              menu_proxy ;;
-    *) die "$(L "Usage: sudo tuwunel proxy [enable|disable|config|add [label] [uuid]|list]" "用法: sudo tuwunel proxy [enable|disable|config|add [备注] [uuid]|list]")" ;;
+    *) die "$(L "Usage: sudo tuwunel proxy [wizard|enable|disable|config|add [label] [uuid]|list]" "用法: sudo tuwunel proxy [wizard|enable|disable|config|add [备注] [uuid]|list]")" ;;
   esac
   exit 0
 fi
