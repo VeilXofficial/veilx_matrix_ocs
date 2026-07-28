@@ -525,6 +525,327 @@ fi
 command -v apt-get >/dev/null 2>&1 || die "$(L "This script supports Ubuntu / Debian only. Choose Ubuntu 22.04/24.04 for your server." "本脚本仅支持 Ubuntu / Debian。买服务器请选 Ubuntu 22.04/24.04")"
 SELF_SRC=""; [ -f "${0:-}" ] && SELF_SRC="$(cd "$(dirname -- "$0")" && pwd)/$(basename -- "$0")"
 
+# =====================================================================
+#  VeilX 专用代理(VLESS + XTLS-Vision + REALITY)
+#  ------------------------------------------------------------------
+#  为什么这台机器特别适合做 REALITY:REALITY 需要"借"一个真实网站的 TLS
+#  握手来伪装,而本机【本来就在跑真实的 Matrix/Element 站点 + 真实证书】。
+#  于是 dest 直接指向本机的 Caddy —— 探测者打过来看到的是【货真价实】的
+#  站点和证书,IP↔域名↔证书三者完全自洽(比借 microsoft.com 更难被识破)。
+#
+#  端口布局(开启后):
+#    :80/tcp   → Caddy      (保留!ACME HTTP-01 续证靠它)
+#    :443/tcp  → Xray       ├─ 合法 VeilX 客户端 → freedom 出网
+#                           └─ 其他任何人/主动探测 → caddy:443 → 真实站点
+#    :443/udp  → 不发布      (否则浏览器走 HTTP/3 会绕过 Xray)
+#
+#  客户端凭据存 xray/clients.tsv,config.json 每次由它重新生成(不依赖 jq)。
+# =====================================================================
+XRAY_IMAGE="${XRAY_IMAGE:-ghcr.io/xtls/xray-core:latest}"
+
+px_dir()      { echo "$INSTALL_DIR/xray"; }
+px_clients()  { echo "$INSTALL_DIR/xray/clients.tsv"; }
+px_enabled()  { [ "$(env_saved ENABLE_PROXY)" = "1" ]; }
+
+# 在 .env 里写/改一个键(不重写整个文件,供子命令单独调用)
+px_env_set() {
+  local k="$1" v="$2" f="$INSTALL_DIR/.env"
+  [ -f "$f" ] || return 1
+  if grep -qE "^$k=" "$f" 2>/dev/null; then
+    sed -i "s|^$k=.*|$k=$v|" "$f"
+  else
+    printf '%s=%s\n' "$k" "$v" >> "$f"
+  fi
+  chmod 600 "$f" 2>/dev/null || true
+}
+
+# 借用 xray 镜像本身生成密钥,不往宿主机装任何东西
+px_xray_run() { docker run --rm "$XRAY_IMAGE" "$@" 2>/dev/null; }
+
+# 由 clients.tsv 重新生成 xray/config.json
+px_write_config() {
+  local d; d="$(px_dir)"
+  local dom pbk_priv sids
+  dom="$(env_saved MATRIX_DOMAIN)"
+  pbk_priv="$(cat "$d/private.key" 2>/dev/null)"
+  sids="$(cat "$d/shortids.txt" 2>/dev/null | tr '\n' ' ')"
+  [ -n "$dom" ] && [ -n "$pbk_priv" ] || return 1
+
+  # clients 数组
+  local cl="" uuid label rest first=1
+  while IFS="$(printf '\t')" read -r uuid label rest; do
+    [ -n "$uuid" ] || continue
+    case "$uuid" in \#*) continue;; esac
+    [ $first -eq 1 ] || cl="$cl,"
+    cl="$cl{\"id\":\"$uuid\",\"flow\":\"xtls-rprx-vision\",\"email\":\"$(json_esc "${label:-client}")\"}"
+    first=0
+  done < "$(px_clients)"
+
+  # shortIds 数组
+  local si="" s; first=1
+  for s in $sids; do
+    [ $first -eq 1 ] || si="$si,"
+    si="$si\"$s\""; first=0
+  done
+  [ -n "$si" ] || si='""'
+
+  cat > "$d/config.json" <<EOF
+{
+  "log": { "loglevel": "warning" },
+  "inbounds": [
+    {
+      "tag": "veilx-reality",
+      "listen": "0.0.0.0",
+      "port": 443,
+      "protocol": "vless",
+      "settings": { "clients": [$cl], "decryption": "none" },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {
+          "show": false,
+          "dest": "caddy:443",
+          "xver": 0,
+          "serverNames": ["$dom", "matrix.$dom"],
+          "privateKey": "$pbk_priv",
+          "shortIds": [$si]
+        }
+      },
+      "sniffing": { "enabled": true, "destOverride": ["http", "tls", "quic"] }
+    }
+  ],
+  "outbounds": [
+    { "tag": "direct", "protocol": "freedom" },
+    { "tag": "block",  "protocol": "blackhole" }
+  ]
+}
+EOF
+  chmod 600 "$d/config.json" 2>/dev/null || true
+}
+
+# 生成 veilx:// 链接(标准 REALITY 参数,客户端内部还原成标准 vless://)
+px_link() {
+  local uuid="$1" label="${2:-VeilX}" d dom pbk sid host
+  d="$(px_dir)"; dom="$(env_saved MATRIX_DOMAIN)"
+  pbk="$(cat "$d/public.key" 2>/dev/null)"
+  sid="$(head -1 "$d/shortids.txt" 2>/dev/null)"
+  host="$(env_saved PROXY_HOST)"; [ -n "$host" ] || host="$dom"
+  printf 'veilx://proxy?server=%s&port=443&id=%s&pbk=%s&sid=%s&sni=%s&fp=chrome&flow=xtls-rprx-vision&type=tcp&name=%s&v=1' \
+    "$host" "$uuid" "$pbk" "$sid" "$dom" "$(px_urlenc "$label")"
+}
+
+# 百分号编码(按字节处理,LC_ALL=C 保证中文备注也能正确编码)
+px_urlenc() {
+  local LC_ALL=C s="$1" out="" i c
+  for i in $(seq 0 $(( ${#s} - 1 ))); do
+    c="${s:$i:1}"
+    case "$c" in
+      [A-Za-z0-9.~_-]) out="$out$c" ;;
+      *) out="$out$(printf '%%%02X' "'$c")" ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
+px_qr() {
+  command -v qrencode >/dev/null 2>&1 || {
+    echo "$(L "  (installing qrencode for the QR code…)" "  (正在安装 qrencode 以显示二维码…)")"
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq qrencode >/dev/null 2>&1 || true
+  }
+  command -v qrencode >/dev/null 2>&1 && qrencode -t ANSIUTF8 -m 1 "$1" 2>/dev/null || true
+}
+
+px_print_client() {
+  local uuid="$1" label="$2" link
+  link="$(px_link "$uuid" "$label")"
+  printf '\n%s%s%s\n' "$C_B$C_CYAN" "$(L "== VeilX proxy link ==" "== VeilX 代理链接 ==")" "$C_RESET"
+  printf '  %s: %s%s%s\n' "$(L Label 备注)" "$C_B" "$label" "$C_RESET"
+  printf '\n%s\n\n' "$link"
+  px_qr "$link"
+  echo "$(L "  Scan it in VeilX (Settings → Proxy → Scan), or tap the link on the phone." "  在 VeilX 里扫码添加(设置 → 代理 → 扫码),或在手机上直接点这个链接。")"
+}
+
+px_add_client() {
+  local label="${1:-}"
+  [ -f "$(px_clients)" ] || die "$(L "Proxy not enabled yet — run: sudo tuwunel proxy enable" "尚未开启代理 —— 请先执行: sudo tuwunel proxy enable")"
+  if [ -z "$label" ]; then
+    local p; p="$(L "Label for this device (e.g. my-phone): " "这台设备的备注(如 my-phone): ")"
+    if [ -t 0 ]; then read -rp "$p" label || true
+    elif [ -e /dev/tty ]; then read -rp "$p" label < /dev/tty || true; fi
+  fi
+  label="$(printf '%s' "${label:-device}" | tr -d '\t\n')"
+  local uuid; uuid="$(px_xray_run uuid)"
+  [ -n "$uuid" ] || uuid="$(cat /proc/sys/kernel/random/uuid 2>/dev/null)"
+  [ -n "$uuid" ] || die "$(L "Failed to generate a UUID" "生成 UUID 失败")"
+  printf '%s\t%s\t%s\n' "$uuid" "$label" "$(date +%F)" >> "$(px_clients)"
+  px_write_config || die "$(L "Failed to write xray config" "写入 xray 配置失败")"
+  ( cd "$INSTALL_DIR" && docker compose up -d xray >/dev/null 2>&1 && docker compose restart xray >/dev/null 2>&1 ) || true
+  ok "$(L "Client added." "客户端已添加。")"
+  px_print_client "$uuid" "$label"
+}
+
+px_list() {
+  local f; f="$(px_clients)"
+  [ -f "$f" ] || die "$(L "Proxy not enabled yet." "尚未开启代理。")"
+  printf '\n%s\n' "$(L "== VeilX proxy clients ==" "== VeilX 代理客户端 ==")"
+  local uuid label date_ n=0
+  while IFS="$(printf '\t')" read -r uuid label date_; do
+    [ -n "$uuid" ] || continue
+    n=$((n+1))
+    printf '  %s) %-20s %s  %s\n' "$n" "${label:-device}" "${date_:-}" "${uuid%%-*}…"
+  done < "$f"
+  [ "$n" -gt 0 ] || echo "$(L "  (none yet — sudo tuwunel proxy add)" "  (还没有 —— sudo tuwunel proxy add)")"
+  echo
+}
+
+px_enable() {
+  [ -d "$INSTALL_DIR" ] || die "$(L "$INSTALL_DIR not found — deploy the server first" "找不到 $INSTALL_DIR —— 请先部署服务器")"
+  cd "$INSTALL_DIR"
+  local dom; dom="$(env_saved MATRIX_DOMAIN)"
+  [ -n "$dom" ] || die "$(L "Can't read the domain from .env" "读不到 .env 里的域名")"
+  local d; d="$(px_dir)"; mkdir -p "$d"; chmod 700 "$d"
+
+  if px_enabled && [ -f "$d/config.json" ]; then
+    warn "$(L "Proxy is already enabled." "代理已经是开启状态。")"; px_list; return 0
+  fi
+
+  bold "$(L "Enabling the VeilX dedicated proxy (VLESS+Vision+REALITY)" "开启 VeilX 专用代理(VLESS+Vision+REALITY)")"
+  echo "$(L "  Xray will take over :443; Caddy keeps :80 (for cert renewal) and stays reachable internally." "  Xray 将接管 :443;Caddy 保留 :80(续证用)并继续在内网提供服务。")"
+  echo "$(L "  Probes that aren't VeilX clients get your REAL Matrix site — that's the camouflage." "  非 VeilX 客户端的探测会看到你【真实的】Matrix 站点 —— 这就是伪装。")"
+
+  docker image inspect "$XRAY_IMAGE" >/dev/null 2>&1 || {
+    echo "$(L "  Pulling Xray image…" "  正在拉取 Xray 镜像…")"
+    docker pull -q "$XRAY_IMAGE" >/dev/null 2>&1 || die "$(L "Failed to pull $XRAY_IMAGE" "拉取 $XRAY_IMAGE 失败")"
+  }
+
+  # 密钥对 + shortIds(仅在首次生成)
+  if [ ! -f "$d/private.key" ]; then
+    local kp priv pub
+    kp="$(px_xray_run x25519)"
+    priv="$(printf '%s\n' "$kp" | grep -iE 'private' | sed 's/.*: *//' | tr -d '\r')"
+    pub="$(printf '%s\n' "$kp"  | grep -iE 'public'  | sed 's/.*: *//' | tr -d '\r')"
+    [ -n "$priv" ] && [ -n "$pub" ] || die "$(L "Failed to generate REALITY keys" "生成 REALITY 密钥失败")"
+    printf '%s\n' "$priv" > "$d/private.key"
+    printf '%s\n' "$pub"  > "$d/public.key"
+    chmod 600 "$d/private.key" "$d/public.key"
+  fi
+  [ -f "$d/shortids.txt" ] || { openssl rand -hex 4 > "$d/shortids.txt"; chmod 600 "$d/shortids.txt"; }
+  [ -f "$(px_clients)" ] || { : > "$(px_clients)"; chmod 600 "$(px_clients)"; }
+
+  px_env_set ENABLE_PROXY 1
+  px_write_config || die "$(L "Failed to write xray config" "写入 xray 配置失败")"
+  px_apply_compose || die "$(L "Failed to update docker-compose.yml" "更新 docker-compose.yml 失败")"
+
+  echo "$(L "  Restarting services…" "  正在重启服务…")"
+  docker compose up -d --remove-orphans >/dev/null 2>&1 || warn "$(L "compose up reported an error — check: docker compose ps" "compose up 报错 —— 请查: docker compose ps")"
+  sleep 3
+  if docker compose ps --status running -q xray 2>/dev/null | grep -q .; then
+    ok "$(L "VeilX proxy is running on :443 (REALITY, camouflaged as your Matrix site)." "VeilX 代理已在 :443 运行(REALITY,伪装成你的 Matrix 站点)。")"
+  else
+    warn "$(L "xray did not come up: docker compose logs --tail 30 xray" "xray 没起来: docker compose logs --tail 30 xray")"
+  fi
+  echo "$(L "  Verify camouflage from outside:  curl -I https://$dom" "  从外部验证伪装:  curl -I https://$dom")"
+  echo "$(L "  Roll back any time:              sudo tuwunel proxy disable" "  随时回滚:                        sudo tuwunel proxy disable")"
+  px_add_client "phone"
+}
+
+px_disable() {
+  [ -d "$INSTALL_DIR" ] || die "$(L "$INSTALL_DIR not found" "找不到 $INSTALL_DIR")"
+  cd "$INSTALL_DIR"
+  px_env_set ENABLE_PROXY 0
+  px_apply_compose || warn "$(L "Failed to restore docker-compose.yml — check the .bak-preproxy backup" "还原 docker-compose.yml 失败 —— 请查 .bak-preproxy 备份")"
+  docker compose stop xray >/dev/null 2>&1 || true
+  docker compose rm -f xray >/dev/null 2>&1 || true
+  docker compose up -d --remove-orphans >/dev/null 2>&1 || true
+  sleep 2
+  ok "$(L ":443 has been handed back to Caddy. Client credentials are kept (re-enable any time)." ":443 已还给 Caddy。客户端凭据保留(随时可再开启)。")"
+}
+
+# 按 ENABLE_PROXY 改写 docker-compose.yml:caddy 端口 + xray 服务
+# 改动前自动留一份 .bak-preproxy(只留第一次的,即"未开代理时"的原样)
+px_apply_compose() {
+  local f="$INSTALL_DIR/docker-compose.yml"
+  [ -f "$f" ] || return 1
+  [ -f "$f.bak-preproxy" ] || cp -a "$f" "$f.bak-preproxy"
+
+  # 先移除脚本上次注入的 xray 段(幂等)
+  sed -i '/# >>> veilx-proxy >>>/,/# <<< veilx-proxy <<</d' "$f"
+
+  if px_enabled; then
+    # Caddy 让出宿主机 443(容器内仍监听 443,Xray 通过内网 caddy:443 转发)
+    sed -i 's|^\( *\)ports: \["80:80", "443:443", "443:443/udp"\]|\1ports: ["80:80"]   # veilx-proxy: 443 交给 xray|' "$f"
+    # 在 networks: 段之前插入 xray 服务
+    local tmp="$f.veilxtmp"
+    awk '
+      /^networks:/ && !done {
+        print "# >>> veilx-proxy >>>"
+        print "  xray:"
+        print "    image: '"$XRAY_IMAGE"'"
+        print "    restart: unless-stopped"
+        print "    logging: *log"
+        print "    security_opt: [\"no-new-privileges:true\"]"
+        print "    depends_on: [caddy]"
+        print "    ports: [\"443:443/tcp\"]"
+        print "    volumes:"
+        print "      - ./xray/config.json:/etc/xray/config.json:ro"
+        print "    command: [\"run\", \"-c\", \"/etc/xray/config.json\"]"
+        print "    mem_limit: 96m"
+        print "    networks: [internal]"
+        print ""
+        print "# <<< veilx-proxy <<<"
+        done=1
+      }
+      { print }
+    ' "$f" > "$tmp" && mv "$tmp" "$f"
+  else
+    # 还原 caddy 端口
+    sed -i 's|^\( *\)ports: \["80:80"\] *# veilx-proxy.*|\1ports: ["80:80", "443:443", "443:443/udp"]|' "$f"
+  fi
+  return 0
+}
+
+menu_proxy() {
+  INSTALL_DIR="${INSTALL_DIR:-/opt/tuwunel}"
+  [ -d "$INSTALL_DIR" ] || die "$(L "$INSTALL_DIR not found" "找不到 $INSTALL_DIR")"
+  cd "$INSTALL_DIR"
+  while :; do
+    local st
+    if px_enabled; then st="$(L "ON" "已开启")"; else st="$(L "OFF" "未开启")"; fi
+    cat <<EOF
+
+┌──────────────────────────────────────────────┐
+│  $(L "VeilX dedicated proxy (REALITY)" "VeilX 专用代理(REALITY)")  [$st]
+└──────────────────────────────────────────────┘
+  1) $(L "Enable (Xray takes :443, camouflaged as your Matrix site)" "开启(Xray 接管 :443,伪装成你的 Matrix 站点)")
+  2) $(L "Add a client → prints a veilx:// link + QR" "添加客户端 → 输出 veilx:// 链接 + 二维码")
+  3) $(L "List clients" "查看客户端列表")
+  4) $(L "Show a client's link/QR again" "重新显示某个客户端的链接/二维码")
+  5) $(L "Disable (hand :443 back to Caddy)" "关闭(把 :443 还给 Caddy)")
+  0) $(L Back 返回)
+EOF
+    local c=""
+    if [ -t 0 ]; then read -rp "$(L "Select [0-5]: " "请选择 [0-5]: ")" c || return 0
+    else read -rp "$(L "Select [0-5]: " "请选择 [0-5]: ")" c < /dev/tty 2>/dev/null || return 0; fi
+    case "$c" in
+      1) px_enable ;;
+      2) px_add_client ;;
+      3) px_list ;;
+      4) px_list
+         local n="" i=0 uuid label rest
+         if [ -t 0 ]; then read -rp "$(L "Which number? " "第几个? ")" n || true
+         else read -rp "$(L "Which number? " "第几个? ")" n < /dev/tty 2>/dev/null || true; fi
+         while IFS="$(printf '\t')" read -r uuid label rest; do
+           [ -n "$uuid" ] || continue; i=$((i+1))
+           [ "$i" = "$n" ] && { px_print_client "$uuid" "${label:-device}"; break; }
+         done < "$(px_clients)" ;;
+      5) px_disable ;;
+      0|"") return 0 ;;
+      *) warn "$(L "Invalid choice" "无效选择")" ;;
+    esac
+    press_enter
+  done
+}
+
 # ---------------------------------------------------------------------
 # 子命令
 # ---------------------------------------------------------------------
@@ -643,6 +964,20 @@ if [ "${1:-}" = "disable-admin" ]; then ENABLE_ADMIN=0; RECONFIG=1; set --; fi
 if [ "${1:-}" = "enable-elementx" ];  then ENABLE_ELEMENTX=1; RECONFIG=1; set --; fi
 if [ "${1:-}" = "disable-elementx" ]; then ENABLE_ELEMENTX=0; RECONFIG=1; set --; fi
 # 子命令: privacy —— 隐私/元数据:看能删什么、当前加固状态、清容器日志
+# 子命令: proxy —— VeilX 专用代理(REALITY)。无参进菜单,也可直接带动作。
+if [ "${1:-}" = "proxy" ]; then
+  INSTALL_DIR="${INSTALL_DIR:-/opt/tuwunel}"
+  case "${2:-}" in
+    enable)          px_enable ;;
+    disable)         px_disable ;;
+    add|add-client)  px_add_client "${3:-}" ;;
+    list)            px_list ;;
+    "")              menu_proxy ;;
+    *) die "$(L "Usage: sudo tuwunel proxy [enable|disable|add|list]" "用法: sudo tuwunel proxy [enable|disable|add|list]")" ;;
+  esac
+  exit 0
+fi
+
 if [ "${1:-}" = "privacy" ]; then INSTALL_DIR="${INSTALL_DIR:-/opt/tuwunel}"; menu_privacy; exit 0; fi
 if [ "${1:-}" = "forget-secrets" ]; then INSTALL_DIR="${INSTALL_DIR:-/opt/tuwunel}"; menu_forget_secrets; exit 0; fi
 # 子命令: lang —— 切换脚本界面语言(English / 简体中文),写进 .env 持久化(装好后随时可改)
@@ -728,6 +1063,7 @@ if [ "$RECONFIG" -eq 0 ] && [ -f "$INSTALL_DIR/CREDENTIALS.txt" ] \
   s) $(L "Wipe plaintext credentials file (anti-forensics: remove on-disk password/token)" "涂销明文凭据文件(抗取证:去掉磁盘上的明文密码/邀请码)")
   b) $(L "Scheduled encrypted backup (optional: weekly auto, with rotation/skip-if-full)" "自动定时加密备份(可选:开启后每周自动,含轮转/满盘跳过)")
   a) $(L "Change admin panel URL (admin. → another subdomain)" "修改后台网址(admin. → 别的子域)")
+  x) $(L "VeilX dedicated proxy (REALITY anti-censorship; link + QR for the app)" "VeilX 专用代理(REALITY 抗封锁;给 App 出链接+二维码)")$([ "$(env_saved ENABLE_PROXY)" = "1" ] && L "  [ON]" "  [已开启]")
   L) $(L "Switch interface language → 中文" "切换界面语言 → English")   (语言 / Language)
   0) $(L Exit 退出)
 EOF
@@ -754,6 +1090,7 @@ EOF
            [ -d "$INSTALL_DIR" ] || exit 0 ;;
         10) [ -f "$SELF_BIN" ] && INSTALL_DIR="$INSTALL_DIR" bash "$SELF_BIN" uninstall || warn "$(L "script copy missing" "缺少脚本副本")"
            [ -d "$INSTALL_DIR" ] || exit 0 ;;
+        x|X) menu_proxy ;;
         p|P) menu_privacy ;;
         s|S) menu_forget_secrets ;;
         b|B) menu_autobackup ;;
@@ -1095,6 +1432,8 @@ umask 077
 [ -f .env ] && cp -a .env ".env.bak-$(date +%F-%H%M%S)" 2>/dev/null || true
 env_get(){ grep -E "^$1=" .env 2>/dev/null | head -1 | cut -d= -f2- || true; }
 REG_TOKEN="$(env_get REG_TOKEN)"; [ -n "$REG_TOKEN" ] || REG_TOKEN="$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | cut -c1-24)"
+# VeilX 专用代理:重跑安装/改配置时保留开关(compose 重新生成后由 px_apply_compose 再注入)
+ENABLE_PROXY="$(env_get ENABLE_PROXY)"; case "$ENABLE_PROXY" in 1) :;; *) ENABLE_PROXY=0;; esac
 [ -n "${ENABLE_CALLS_KEYS:-}" ] || true
 LK_KEY="$(env_get LIVEKIT_API_KEY)"; [ -n "$LK_KEY" ] || LK_KEY="API$(openssl rand -hex 6)"
 LK_SECRET="$(env_get LIVEKIT_API_SECRET)"; [ -n "$LK_SECRET" ] || LK_SECRET="$(openssl rand -hex 32)"
@@ -1113,6 +1452,7 @@ ENABLE_ADMIN=$ENABLE_ADMIN
 ADMIN_SUB=$ADMIN_SUB
 ENABLE_ELEMENTX=$ENABLE_ELEMENTX
 ENABLE_PRIVACY=$ENABLE_PRIVACY
+ENABLE_PROXY=$ENABLE_PROXY
 USE_CDN=$USE_CDN
 MAX_UPLOAD_BYTES=$MAX_UPLOAD_BYTES
 TUWUNEL_MEM=$TUWUNEL_MEM
@@ -1497,6 +1837,8 @@ fi
 # 6. 启动 + 验收
 # ---------------------------------------------------------------------
 bold "$(L "6/6 Start up (first run pulls images, a few minutes)" "6/6 启动(首次拉镜像需几分钟)")"
+# compose 刚被重新生成,若 VeilX 代理是开启状态,需把 xray 段和 caddy 端口改动重新注入。
+if [ "$ENABLE_PROXY" = "1" ]; then px_apply_compose || warn "$(L "Failed to re-apply the VeilX proxy to docker-compose.yml" "重新注入 VeilX 代理到 docker-compose.yml 失败")"; fi
 [ "$RECONFIG" -eq 0 ] && docker compose pull -q || true
 # up -d 不会因 Caddyfile(绑定挂载)内容变化而重启正在运行的 caddy,只创建新容器(如 ketesa)/启动停止的容器,故对运行中的站点安全。
 docker compose up -d --remove-orphans
