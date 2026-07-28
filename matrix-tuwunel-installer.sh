@@ -732,6 +732,37 @@ px_ask() {
   printf '%s' "$ans"
 }
 
+# 验证一个站点能不能当伪装目标。
+# 这一步很重要:同样是知名大站,能不能用差别极大(实测 www.apple.com /
+# dl.google.com / www.irs.gov 可用,而 www.microsoft.com 不可用),而且选错
+# 之后客户端只会显示"超时",完全看不出原因。要求:TLS1.3 + H2 + 证书匹配。
+# 粗筛,不是保证。REALITY 对 dest 的真实要求是:TLS1.3 + 用 X25519 密钥交换
+# 且不触发 HelloRetryRequest + 支持 H2。这里用 openssl 尽量逼近(-groups X25519
+# 是关键),但仍有站点能过粗筛却用不了 —— 实测 www.microsoft.com 就是 TLS1.3+H2
+# 齐全却依然握手不成。所以默认走下面那份【实测验证过】的清单,自定义输入只挡
+# 明显不合格的(比如只会 301 跳转的 irs.gov)。
+px_check_dest() {
+  local host="${1%%:*}" out="" TO=""
+  # timeout(1) 是 GNU coreutils 的,Ubuntu 有、别的系统未必 —— 没有就不加,
+  # 否则整条命令会因 "command not found" 而被误判成"站点不可用"。
+  command -v timeout >/dev/null 2>&1 && TO="timeout 12"
+  if command -v openssl >/dev/null 2>&1; then
+    out="$(echo | $TO openssl s_client -connect "$host:443" -servername "$host" \
+            -tls1_3 -groups X25519 -alpn h2 2>&1)"
+    # openssl 版本太老不认这些参数时,别误判成"不可用"
+    if echo "$out" | grep -qiE "unknown option|unrecognized|Usage"; then out=""; fi
+    if [ -n "$out" ]; then
+      echo "$out" | grep -q "TLSv1.3" || return 1
+      echo "$out" | grep -qi "ALPN protocol: h2" || return 1
+      return 0
+    fi
+  fi
+  # 退路:至少确认它是个 HTTP/2 的正常站点,而不是跳转页
+  command -v curl >/dev/null 2>&1 || return 0
+  local v; v="$(curl -sI --max-time 12 -o /dev/null -w '%{http_version} %{http_code}' "https://$host/" 2>/dev/null)"
+  case "$v" in 2\ 200|2\ 30*) return 0 ;; *) return 1 ;; esac
+}
+
 # 放行代理端口。80/443 一般默认开着,但 8443 这种非标端口几乎总是被挡:
 # 既可能是机器上的 ufw/firewalld,也可能是云厂商控制台里的安全组 —— 后者
 # 我们改不了,只能明确告诉用户去开,否则手机永远连不上而且毫无提示。
@@ -855,9 +886,46 @@ EOF
        echo; ok "$(L "Using 8443 — your Matrix site will not be affected." "使用 8443 —— 你的 Matrix 网站不受任何影响。")" ;;
   esac
 
-  # 其余一律用最优默认值:借用本机真实站点(IP↔域名↔证书自洽,最难被识破)
-  px_env_set PROXY_DEST "caddy:443"
-  px_env_set PROXY_SNI  ""
+  # ---- 伪装成哪个网站 ----
+  cat <<EOF
+
+$(L "The proxy disguises itself as some real HTTPS website." "代理会把自己伪装成某个真实的 HTTPS 网站。")
+$(L "Anyone probing your server just sees that website." "别人探测你的服务器时,看到的就是那个网站。")
+
+  1) $(L "A well-known public site (no domain of your own needed)" "借用一个知名网站(不需要你自己的域名)")
+     $(L "         Keeps the proxy unrelated to your Matrix server." "         好处:代理和你的 Matrix 服务器互不相关。")
+
+  2) $(L "This server's own Matrix site" "用这台服务器自己的 Matrix 网站")
+     $(L "         Strongest consistency, but ties the proxy to your domain." "         一致性最强,但会把代理和你的域名绑在一起。")
+
+EOF
+  local C; C="$(px_ask "$(L "Select [1-2, default 1]: " "请选择 [1-2,直接回车=1]: ")")"
+  if [ "$C" = "2" ]; then
+    px_env_set PROXY_DEST "caddy:443"
+    px_env_set PROXY_SNI  ""
+    px_env_set PROXY_HOST ""
+    ok "$(L "Disguising as your own Matrix site." "将伪装成你自己的 Matrix 站点。")"
+  else
+    # 逐个验证,选第一个真正可用的 —— 不能用的站会让客户端只报超时。
+    local site="" cand
+    echo "$(L "  Checking which sites work as a disguise…" "  正在检测哪些站点可用作伪装…")"
+    for cand in www.apple.com dl.google.com www.irs.gov addons.mozilla.org www.cloudflare.com; do
+      if px_check_dest "$cand"; then site="$cand"; echo "    ✓ $cand"; break; else echo "    ✗ $cand"; fi
+    done
+    if [ -z "$site" ]; then
+      warn "$(L "No candidate worked — falling back to this server's own site." "没有可用的候选 —— 退回使用本机站点。")"
+      px_env_set PROXY_DEST "caddy:443"; px_env_set PROXY_SNI ""; px_env_set PROXY_HOST ""
+    else
+      px_env_set PROXY_DEST "$site:443"
+      px_env_set PROXY_SNI  "$site"
+      # 不用域名了 —— 客户端直接连 IP。
+      local myip; myip="$(env_saved PUBLIC_IP)"
+      [ -n "$myip" ] || myip="$(curl -s --max-time 8 https://api.ipify.org 2>/dev/null)"
+      [ -n "$myip" ] && px_env_set PROXY_HOST "$myip"
+      ok "$(L "Disguising as $site — your domain is not involved." "将伪装成 $site —— 不涉及你的域名。")"
+    fi
+  fi
+
   px_env_set PROXY_FLOW "xtls-rprx-vision"
   px_env_set PROXY_FP   "chrome"
 
@@ -903,10 +971,15 @@ px_config() {
        DHOST="$(px_ask "$(L "  Target host:port (e.g. www.microsoft.com:443): " "  目标 主机:端口(如 www.microsoft.com:443): ")")"
        if [ -n "$DHOST" ]; then
          case "$DHOST" in *:*) :;; *) DHOST="$DHOST:443";; esac
-         px_env_set PROXY_DEST "$DHOST"
-         px_env_set PROXY_SNI "${DHOST%%:*}"
-         ok "$(L "Borrowing $DHOST" "已改为借用 $DHOST")"
-         warn "$(L "Note: your IP does not actually host that site — an IP/SNI correlation check can spot the mismatch. The local site is the stronger choice." "注意:你的 IP 并不真的托管那个站点 —— IP/SNI 关联检测能看出不一致。本机站点更稳。")"
+         echo "$(L "  Checking $DHOST …" "  正在检测 $DHOST …")"
+         if px_check_dest "$DHOST"; then
+           px_env_set PROXY_DEST "$DHOST"
+           px_env_set PROXY_SNI "${DHOST%%:*}"
+           ok "$(L "Borrowing $DHOST" "已改为借用 $DHOST")"
+         else
+           warn "$(L "$DHOST can't be used as a disguise (needs TLS 1.3 + HTTP/2). Keeping the current setting." "$DHOST 不能用作伪装目标(需要 TLS 1.3 + HTTP/2)。保持原设置。")"
+           echo "$(L "  Known-good: www.apple.com, dl.google.com, www.irs.gov, addons.mozilla.org" "  已验证可用: www.apple.com、dl.google.com、www.irs.gov、addons.mozilla.org")"
+         fi
        fi ;;
   esac
 
