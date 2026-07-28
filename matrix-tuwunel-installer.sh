@@ -732,6 +732,28 @@ px_ask() {
   printf '%s' "$ans"
 }
 
+# 放行代理端口。80/443 一般默认开着,但 8443 这种非标端口几乎总是被挡:
+# 既可能是机器上的 ufw/firewalld,也可能是云厂商控制台里的安全组 —— 后者
+# 我们改不了,只能明确告诉用户去开,否则手机永远连不上而且毫无提示。
+px_open_firewall() {
+  local port="$1" opened=""
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi "^Status: active"; then
+    ufw allow "$port"/tcp >/dev/null 2>&1 && opened="ufw"
+  elif command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+    firewall-cmd --permanent --add-port="$port"/tcp >/dev/null 2>&1 \
+      && firewall-cmd --reload >/dev/null 2>&1 && opened="firewalld"
+  fi
+  [ -n "$opened" ] && ok "$(L "Opened port $port in the local firewall ($opened)." "已在本机防火墙放行 $port 端口($opened)。")"
+
+  # 本机放行了不代表外网能进 —— 云厂商的安全组在机器之外。
+  if [ "$port" != "443" ] && [ "$port" != "80" ]; then
+    echo
+    warn "$(L "IMPORTANT: port $port must also be allowed in your VPS provider's firewall / security group." "重要:$port 端口还必须在你的 VPS 服务商控制台(防火墙/安全组)里放行。")"
+    echo "$(L "  Ports 80 and 443 are usually open by default; $port almost never is." "  80 和 443 通常默认开放,$port 基本上一定是关的。")"
+    echo "$(L "  Without that, your phone will simply time out with no useful error." "  不放行的话,手机只会一直超时,而且看不出原因。")"
+  fi
+}
+
 # 运行状态自检。用大白话说结论,不堆术语 —— 用户要的是
 # 「现在到底能不能用」,而不是一堆容器名和端口号。
 px_status() {
@@ -762,7 +784,25 @@ px_status() {
     *)      ok "$(L "Your Matrix site is up (HTTP $code)" "你的 Matrix 网站正常(HTTP $code)")" ;;
   esac
 
-  # 3) 设备数
+  # 3) 端口是否真的从外网进得来 —— 容器在跑 ≠ 手机连得上。
+  #    绝大多数"连不上"其实卡在云厂商安全组,而不是软件本身。
+  if [ "$running" = "1" ]; then
+    local ip reach
+    ip="$(env_saved PUBLIC_IP)"
+    [ -n "$ip" ] || ip="$(curl -s --max-time 8 https://api.ipify.org 2>/dev/null)"
+    if [ -n "$ip" ] && command -v curl >/dev/null 2>&1; then
+      # 从本机绕到公网 IP 打自己的端口:能通说明外部也能通。
+      if timeout 10 bash -c "</dev/tcp/$ip/$port" 2>/dev/null; then
+        ok "$(L "Port $port is reachable from outside." "$port 端口从外部可以连通。")"
+      else
+        warn "$(L "Port $port is NOT reachable from outside — this is why phones can't connect." "$port 端口从外部【连不通】—— 手机连不上就是因为这个。")"
+        echo "   $(L "Open it in your VPS provider's firewall / security group." "请到 VPS 服务商控制台的防火墙/安全组里放行它。")"
+        echo "   $(L "Or switch to port 443 (menu → 9 → Advanced), which is usually already open." "或者改用 443 端口(菜单 → 9 高级设置),那个通常已经开着。")"
+      fi
+    fi
+  fi
+
+  # 4) 设备数
   local n=0
   [ -f "$(px_clients)" ] && n="$(grep -c . "$(px_clients)" 2>/dev/null || echo 0)"
   echo "   $(L "Devices added:" "已添加设备:") $n"
@@ -1037,6 +1077,7 @@ px_enable() {
   fi
 
   ok "$(L "VeilX proxy is running on :$(px_port)." "VeilX 代理已在 :$(px_port) 运行。")"
+  px_open_firewall "$(px_port)"
   # 端口非 443 时,curl https://域名 打的是 Caddy 而不是代理 —— 那样"验证通过"
   # 是假象,所以要显式带上代理端口。
   if [ "$(px_port)" = "443" ]; then
