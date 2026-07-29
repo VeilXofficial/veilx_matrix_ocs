@@ -400,6 +400,104 @@ menu_forget_secrets() {
   echo "$(L "  Note: deletion on SSD/VPS is not a guaranteed physical wipe; the only reliable destruction is LUKS crypto-erase or destroying the disk." "  注:SSD/VPS 上删除不保证物理擦除;彻底销毁只能靠 LUKS 加密擦除或销毁磁盘。")"
 }
 
+# 成员应急处置:被拘捕/失联时对某个成员的密钥做处置。
+# 分层的关键:【冻结】可撤销,是拘捕头几小时该做的事(还不知道人会不会被放);
+# 【销毁】不可撤销,确认危险后再用。只有这两级分开,管理员才敢在第一时间动手。
+menu_oprf_members() {
+  cd "$INSTALL_DIR" 2>/dev/null || return
+  local D; D="$(env_saved MATRIX_DOMAIN)"
+  # 处置时可顺带吊销该账号的 Matrix 登录会话:否则对方若在【已解锁+联网】状态下
+  # 拿到手机,仍能用他的账号继续收发消息、看群里在说什么。
+  _revoke_sessions() {
+    local acct="$1"
+    docker compose exec -T tuwunel tuwunel-admin users deactivate "$acct" >/dev/null 2>&1 \
+      || docker compose exec -T tuwunel /usr/bin/tuwunel --execute "users deactivate $acct" >/dev/null 2>&1 \
+      || return 1
+  }
+  # sled 是单进程独占的:任何管理操作都必须先停服务容器,否则打不开数据库。
+  # 停机时间约 1-2 秒;期间成员解锁会失败(会自动重试)。
+  _oprf_admin() {
+    local out rc
+    docker compose stop oprf >/dev/null 2>&1
+    out="$(docker compose run --rm oprf "$@" 2>&1)"; rc=$?
+    docker compose start oprf >/dev/null 2>&1
+    printf '%s' "$out"
+    return $rc
+  }
+  while :; do
+    printf '\n%s\n' "$(L "── Member emergency response ──" "── 成员应急处置 ──")"
+    printf '%s\n' "$(L '
+  Detained / out of contact? FREEZE first — it blocks that phone from unlocking but
+  keeps the key, so you can undo it if they come back safely. Only DESTROY once you
+  are sure: that is permanent, and even the correct PIN will never open it again.' '
+  成员被拘捕/失联?先【冻结】—— 挡住那台手机解锁,但保住密钥,人平安回来可撤销。
+  确认危险后再【销毁】——不可逆,之后连正确的 PIN 也永远打不开。')"
+    echo ""
+    echo "  1) $(L "Member status (who is enrolled; keys are never shown)" "查看成员状态(谁启用了;不显示任何密钥)")"
+    echo "  2) $(L "FREEZE a member (reversible — use this first)" "【冻结】某成员(可撤销 —— 第一时间用这个)")"
+    echo "  3) $(L "Release a member (undo freeze)" "【解冻】某成员(撤销冻结)")"
+    echo "  4) $(L "DESTROY a member's key (permanent)" "【销毁】某成员的密钥(永久,不可逆)")"
+    echo "  5) $(L "DESTROY THE WHOLE TEAM (base compromised)" "【全队销毁】(据点暴露时)")"
+    echo "  0) $(L Back 返回)"
+    local R=""; if [ -t 0 ]; then read -rp "$(L "Select: " "请选择: ")" R || return; else read -rp "$(L "Select: " "请选择: ")" R < /dev/tty 2>/dev/null || return; fi
+    local acct="" c=""
+    case "$R" in
+      1)
+        echo ""
+        printf '  %-34s %-12s %-10s %s\n' "$(L ACCOUNT 账号)" "$(L STATE 状态)" "$(L "USED/HR" 本小时)" "$(L "LAST USE" 最近使用)"
+        _oprf_admin --admin-list 2>/dev/null | grep -E '^@' | while IFS=$'\t' read -r a s c2 ls; do
+          local st when
+          case "$s" in
+            destroyed) st="$(L destroyed 已销毁)";;
+            frozen)    st="$(L frozen 已冻结)";;
+            *)         st="$(L ok 正常)";;
+          esac
+          if [ "${ls:-0}" = "0" ]; then when="—"; else when="$(date -d "@$ls" '+%m-%d %H:%M' 2>/dev/null || echo "$ls")"; fi
+          printf '  %-34s %-12s %-10s %s\n' "$a" "$st" "${c2:-0}" "$when"
+        done
+        echo ""
+        echo "$(L "  (empty = nobody has enabled the highest level yet)" "  (空 = 还没有成员启用最高级别)")" ;;
+      2|3|4)
+        read -rp "$(L "Full user id (e.g. @li:$D): " "完整用户 id(如 @li:$D): ")" acct || continue
+        [ -n "$acct" ] || continue
+        case "$R" in
+          2) # 必须确认真的生效:紧急时刻误报"已冻结"比失败更危险。
+             if _oprf_admin --admin-freeze "$acct" | grep -q '^ok'; then
+               ok "$(L "FROZEN: $acct can no longer unlock. Reversible — use 'Release' when safe." "已冻结:$acct 暂时无法解锁。可撤销 —— 人安全后用【解冻】。")"
+               printf "%s" "$(L "  Also revoke their Matrix login sessions? [y/N]: " "  是否同时吊销他的 Matrix 登录会话? [y/N]: ")"
+               read -r c || c=""
+               case "$c" in y|Y) _revoke_sessions "$acct" && ok "$(L "sessions revoked" 会话已吊销)" || warn "$(L "couldn't revoke automatically — do it in the admin panel" "自动吊销失败 —— 请到管理后台操作")";; esac
+             else
+               warn "$(L "NOT frozen — no such account, or it was already destroyed. Check the status list." "未能冻结 —— 没有这个账号,或已被销毁。请查看成员状态。")"
+             fi ;;
+          3) if _oprf_admin --admin-unfreeze "$acct" | grep -q '^ok'; then
+               ok "$(L "Released: $acct can unlock again." "已解冻:$acct 可以正常解锁了。")"
+             else
+               warn "$(L "Failed — no such account, or it was already destroyed." "失败 —— 没有这个账号,或已被销毁。")"
+             fi ;;
+          4) warn "$(L "PERMANENT: even the correct PIN will never open $acct's phone again." "不可逆:之后连正确的 PIN 也永远打不开 $acct 的手机。")"
+             read -rp "$(L "Type yes to confirm: " "输入 yes 确认: ")" c || continue
+             [ "$c" = yes ] || { echo "$(L Cancelled 已取消)"; continue; }
+             if _oprf_admin --admin-kill "$acct" | grep -q '^killed'; then
+               ok "$(L "Destroyed. $acct's phones can never be unlocked." "已销毁。$acct 的手机再也无法解锁。")"
+             else warn "$(L "Failed — check: docker compose logs oprf" "失败 —— 请查: docker compose logs oprf")"; fi
+             printf "%s" "$(L "  Also revoke their Matrix login sessions? [Y/n]: " "  是否同时吊销他的 Matrix 登录会话? [Y/n]: ")"
+             read -r c || c=""
+             case "$c" in n|N) :;; *) _revoke_sessions "$acct" && ok "$(L "sessions revoked" 会话已吊销)" || warn "$(L "couldn't revoke automatically — do it in the admin panel" "自动吊销失败 —— 请到管理后台操作")";; esac ;;
+        esac ;;
+      5)
+        warn "$(L "This destroys EVERY member's key. Every VeilX phone on this server becomes permanently unopenable. There is no undo." "这会销毁【所有成员】的密钥。本服务器上每一台 VeilX 手机都将永久打不开。无法撤销。")"
+        read -rp "$(L "Type DESTROY ALL to confirm: " "输入 DESTROY ALL 确认: ")" c || continue
+        [ "$c" = "DESTROY ALL" ] || { echo "$(L Cancelled 已取消)"; continue; }
+        _oprf_admin --admin-kill-all | grep -E '^killed' || true
+        ok "$(L "All member keys destroyed." "全部成员密钥已销毁。")" ;;
+      0|"") return ;;
+    esac
+    press_enter "
+$(L "Press Enter to continue… " "按回车继续… ")"
+  done
+}
+
 # VeilX 加固(服务器辅助 PIN):状态 / 开关 / 远程销毁某成员的密钥。
 menu_oprf() {
   cd "$INSTALL_DIR" 2>/dev/null || { warn "$(L "Deployment directory not found" "未找到部署目录")"; return; }
@@ -420,33 +518,24 @@ menu_oprf() {
     [ "$on" = 1 ] && echo "  $(L "Client endpoint (the app finds this automatically)" "客户端端点(App 会自动找到)"): https://matrix.$D/oprf/"
     echo ""
     if [ "$on" = 1 ]; then
-      echo "  1) $(L "Turn OFF (phones fall back to PIN + hardware only)" "关闭(手机退回仅 PIN + 硬件加密)")"
-      echo "  2) $(L "Destroy a member's key (their phone becomes permanently unopenable)" "销毁某成员的密钥(其手机永久打不开)")"
-      echo "  3) $(L "Logs" 查看日志)"
+      echo "  1) $(L "MEMBER EMERGENCY RESPONSE (detained: freeze / release / destroy)" "【成员应急处置】(成员被拘捕:冻结 / 解冻 / 销毁)")"
+      echo "  2) $(L "Logs" 查看日志)"
+      echo "  3) $(L "Turn OFF (phones fall back to PIN + hardware only)" "关闭(手机退回仅 PIN + 硬件加密)")"
     else
       echo "  1) $(L "Turn ON" 开启)"
     fi
     echo "  0) $(L Back 返回)"
     local R=""; if [ -t 0 ]; then read -rp "$(L "Select: " "请选择: ")" R || return; else read -rp "$(L "Select: " "请选择: ")" R < /dev/tty 2>/dev/null || return; fi
     case "$R" in
-      1) if [ "$on" = 1 ]; then
-           [ -f "$SELF_BIN" ] && INSTALL_DIR="$INSTALL_DIR" bash "$SELF_BIN" disable-oprf || warn "$(L "script copy missing" "缺少脚本副本")"
+      1) if [ "$on" = 1 ]; then menu_oprf_members
          else
            [ -f "$SELF_BIN" ] && INSTALL_DIR="$INSTALL_DIR" bash "$SELF_BIN" enable-oprf || warn "$(L "script copy missing" "缺少脚本副本")"
-         fi; return ;;
-      2) [ "$on" = 1 ] || continue
-         local acct=""; read -rp "$(L "Full user id (e.g. @li:$D): " "完整用户 id(如 @li:$D): ")" acct || continue
-         [ -n "$acct" ] || continue
-         warn "$(L "This is IRREVERSIBLE: even the correct PIN will never open $acct's phone again." "此操作不可逆:之后连正确的 PIN 也永远打不开 $acct 的手机。")"
-         local c=""; read -rp "$(L "Type yes to confirm: " "输入 yes 确认: ")" c || continue
-         [ "$c" = yes ] || { echo "$(L Cancelled 已取消)"; continue; }
-         # sled 单进程独占:先停容器,用一次性容器打 tombstone,再起回来。
-         docker compose stop oprf >/dev/null 2>&1
-         if docker compose run --rm oprf --admin-kill "$acct" >/dev/null 2>&1; then
-           ok "$(L "Destroyed. $acct's phones can no longer be unlocked." "已销毁。$acct 的手机再也无法解锁。")"
-         else warn "$(L "Failed — check: docker compose logs oprf" "失败 —— 请查: docker compose logs oprf")"; fi
-         docker compose start oprf >/dev/null 2>&1 ;;
-      3) docker compose logs --tail 50 oprf 2>/dev/null || true ;;
+           return
+         fi ;;
+      2) [ "$on" = 1 ] && { docker compose logs --tail 50 oprf 2>/dev/null || true; } ;;
+      3) [ "$on" = 1 ] || continue
+         [ -f "$SELF_BIN" ] && INSTALL_DIR="$INSTALL_DIR" bash "$SELF_BIN" disable-oprf || warn "$(L "script copy missing" "缺少脚本副本")"
+         return ;;
       0|"") return ;;
     esac
   done
@@ -664,7 +753,19 @@ use std::{sync::Arc, time::{SystemTime, UNIX_EPOCH}};
 #[derive(Clone)]
 struct App { db: sled::Db, http: reqwest::Client, homeserver: String, rate_limit: u32, rate_window: u64 }
 #[derive(Serialize, Deserialize)]
-struct Record { k: [u8; 32], window_start: u64, count: u32, killed: bool }
+struct Record {
+    k: [u8; 32],
+    window_start: u64,
+    count: u32,
+    killed: bool,
+    /// Reversible hold: refuses unlocks but keeps k, so a detention that ends
+    /// well can be undone. `killed` destroys k and can never be undone.
+    #[serde(default)]
+    frozen: bool,
+    /// Unix time of the last successful evaluation (for the admin status list).
+    #[serde(default)]
+    last_seen: u64,
+}
 #[derive(Deserialize)] struct EvalReq { account: String, blinded: String }
 #[derive(Serialize)]   struct EvalResp { evaluated: String }
 #[derive(Deserialize)] struct KillReq { account: String }
@@ -691,9 +792,13 @@ async fn eval(State(app): State<Arc<App>>, headers: axum::http::HeaderMap, Json(
     let key = req.account.as_bytes();
     let mut rec: Record = match app.db.get(key).ok().flatten() {
         Some(b) => serde_json::from_slice(&b).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
-        None => Record { k: Scalar::random(&mut OsRng).to_bytes(), window_start: now(), count: 0, killed: false },
+        None => Record { k: Scalar::random(&mut OsRng).to_bytes(), window_start: now(), count: 0,
+                         killed: false, frozen: false, last_seen: 0 },
     };
     if rec.killed { return Err(StatusCode::GONE) }
+    // Frozen: same refusal as rate-limited, so a phone in the wrong hands just
+    // looks "try again later" rather than announcing that we froze the account.
+    if rec.frozen { return Err(StatusCode::TOO_MANY_REQUESTS) }
     let t = now();
     if t.saturating_sub(rec.window_start) >= app.rate_window { rec.window_start = t; rec.count = 0 }
     if rec.count >= app.rate_limit {
@@ -701,6 +806,7 @@ async fn eval(State(app): State<Arc<App>>, headers: axum::http::HeaderMap, Json(
         return Err(StatusCode::TOO_MANY_REQUESTS);
     }
     rec.count += 1;
+    rec.last_seen = t;
     let k: Scalar = Option::from(Scalar::from_canonical_bytes(rec.k)).ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
     let evaluated = (point * k).compress().to_bytes();
     app.db.insert(key, serde_json::to_vec(&rec).unwrap()).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -711,10 +817,59 @@ async fn eval(State(app): State<Arc<App>>, headers: axum::http::HeaderMap, Json(
 /// Destroy this account's k — its phones become permanently unopenable.
 async fn kill(State(app): State<Arc<App>>, headers: axum::http::HeaderMap, Json(req): Json<KillReq>) -> StatusCode {
     if !verify(&app, &headers, &req.account).await { return StatusCode::UNAUTHORIZED }
-    let rec = Record { k: [0u8; 32], window_start: now(), count: 0, killed: true };
+    let rec = Record { k: [0u8; 32], window_start: now(), count: 0, killed: true, frozen: false, last_seen: 0 };
     let _ = app.db.insert(req.account.as_bytes(), serde_json::to_vec(&rec).unwrap());
     let _ = app.db.flush_async().await;
     StatusCode::NO_CONTENT
+}
+
+/// Local admin operations (run by the installer, never exposed over HTTP).
+/// Deliberately has no way to print k: the key must never leave the database.
+fn admin(db: &sled::Db, args: &[String]) {
+    let load = |a: &str| -> Option<Record> {
+        db.get(a.as_bytes()).ok().flatten().and_then(|b| serde_json::from_slice(&b).ok())
+    };
+    let save = |a: &str, r: &Record| {
+        let _ = db.insert(a.as_bytes(), serde_json::to_vec(r).unwrap());
+        let _ = db.flush();
+    };
+    match args[1].as_str() {
+        // account<TAB>state<TAB>used/limit<TAB>last_seen — no key material.
+        "--admin-list" => {
+            for kv in db.iter() {
+                let Ok((k, v)) = kv else { continue };
+                let acct = String::from_utf8_lossy(&k).to_string();
+                let Ok(r) = serde_json::from_slice::<Record>(&v) else { continue };
+                let state = if r.killed { "destroyed" } else if r.frozen { "frozen" } else { "ok" };
+                println!("{}\t{}\t{}\t{}", acct, state, r.count, r.last_seen);
+            }
+        }
+        "--admin-freeze" | "--admin-unfreeze" => {
+            let freeze = args[1] == "--admin-freeze";
+            match load(&args[2]) {
+                Some(mut r) if !r.killed => { r.frozen = freeze; save(&args[2], &r); eprintln!("ok"); }
+                Some(_) => eprintln!("already destroyed"),
+                None => eprintln!("no such account"),
+            }
+        }
+        "--admin-kill" => {
+            let r = Record { k: [0u8; 32], window_start: now(), count: 0, killed: true, frozen: false, last_seen: 0 };
+            save(&args[2], &r);
+            eprintln!("killed {}", args[2]);
+        }
+        // Whole-team destruction, for a compromised base of operations.
+        "--admin-kill-all" => {
+            let mut n = 0;
+            let accts: Vec<String> = db.iter().filter_map(|kv| kv.ok())
+                .map(|(k, _)| String::from_utf8_lossy(&k).to_string()).collect();
+            for a in accts {
+                let r = Record { k: [0u8; 32], window_start: now(), count: 0, killed: true, frozen: false, last_seen: 0 };
+                save(&a, &r); n += 1;
+            }
+            eprintln!("killed {n}");
+        }
+        _ => eprintln!("unknown admin command"),
+    }
 }
 
 #[tokio::main]
@@ -722,12 +877,9 @@ async fn main() {
     let args: Vec<String> = std::env::args().collect();
     let env = |k: &str, d: &str| std::env::var(k).unwrap_or_else(|_| d.to_string());
     let db = sled::open(env("DB", "/data/oprf.db")).expect("open db");
-    // Local admin kill, run by the installer: `--admin-kill @user:server`.
-    if args.len() == 3 && args[1] == "--admin-kill" {
-        let rec = Record { k: [0u8; 32], window_start: now(), count: 0, killed: true };
-        db.insert(args[2].as_bytes(), serde_json::to_vec(&rec).unwrap()).unwrap();
-        db.flush().unwrap();
-        eprintln!("killed {}", args[2]);
+    // Local admin operations, run by the installer (see `admin`).
+    if args.len() >= 2 && args[1].starts_with("--admin-") {
+        admin(&db, &args);
         return;
     }
     let app = Arc::new(App {
