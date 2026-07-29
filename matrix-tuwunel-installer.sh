@@ -1,7 +1,15 @@
 #!/usr/bin/env bash
 # =====================================================================
-#  Matrix 轻量一键安装脚本 · tuwunel 版(通用版 t1.16)
-#  Matrix one-command installer · tuwunel edition (Universal t1.16)
+#  Matrix 轻量一键安装脚本 · tuwunel 版(通用版 t1.17)
+#  Matrix one-command installer · tuwunel edition (Universal t1.17)
+#  t1.17:【VeilX 加固:服务器辅助 PIN(OPRF)】新增可选组件,安装时【选项 7/7】默认开,
+#         装好后菜单 o) 项或 `sudo tuwunel oprf` 管理(状态/开关/销毁某成员密钥/日志),
+#         也可 `sudo tuwunel enable-oprf|disable-oprf`。作用:VeilX 手机解锁必须问这台服务器,
+#         于是【被抄走且离线的手机永远无法爆破 PIN】,成员被抓时可远程销毁其密钥让手机永久打不开。
+#         实现:docker 服务(oprf/,多阶段编译 Rust,不在宿主机装工具链),Caddy 把
+#         matrix.域名/oprf/ 反代到它——复用现有证书,不需新域名/DNS。它看不到任何人的 PIN。
+#         容错:OPRF 是唯一需本地编译的服务,故在主 up -d 前单独 build,失败自动退回未开启
+#         并摘掉编排/路由,保证聊天服务照常可用。
 #  t1.16:【装好后可随时切换界面语言】此前语言只在首次安装时问一次、之后无处可改。现新增
 #         菜单项 L 与 `sudo tuwunel lang`:在 English / 简体中文 间切换,写入 .env(UI_LANG=)持久化,
 #         菜单立即用新语言重绘。(老服务器需先把副本更新到本版,见 t1.15 补救。)
