@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 # =====================================================================
-#  Matrix 轻量一键安装脚本 · tuwunel 版(通用版 t1.17)
-#  Matrix one-command installer · tuwunel edition (Universal t1.17)
+#  Matrix 轻量一键安装脚本 · tuwunel 版(通用版 t1.18)
+#  Matrix one-command installer · tuwunel edition (Universal t1.18)
+#  t1.18:【修复 OPRF 卡死/502】t1.17 的成员管理少了 docker compose run 的 -T,在 SSH 里
+#         会挂起、占着数据库锁,导致主容器崩溃循环、全队最高档手机被锁在外面。本版:
+#         ①run 一律加 -T + trap 兜底 + 管理后强制验证服务复活;②容器打不开锁时不再 panic
+#         死循环,而是等锁释放最多 30s;③新增 `sudo tuwunel oprf-repair`(菜单第 3 项)
+#         一键强杀卡死容器+干净重启(绝不碰数据库文件);④管理前先清理残留的 -run- 容器。
 #  t1.17:【VeilX 加固:服务器辅助 PIN(OPRF)】新增可选组件,安装时【选项 7/7】默认开,
 #         装好后菜单 o) 项或 `sudo tuwunel oprf` 管理(状态/开关/销毁某成员密钥/日志),
 #         也可 `sudo tuwunel enable-oprf|disable-oprf`。作用:VeilX 手机解锁必须问这台服务器,
@@ -416,11 +421,25 @@ menu_oprf_members() {
   }
   # sled 是单进程独占的:任何管理操作都必须先停服务容器,否则打不开数据库。
   # 停机时间约 1-2 秒;期间成员解锁会失败(会自动重试)。
+  # 关键:必须带 -T(不分配伪终端),否则在 SSH/脚本里 `run` 会挂起等待终端、
+  # 一直占着数据库锁,导致随后启动的主容器打不开库而崩溃重启(502)。
+  # 用 trap 兜底:无论中途出什么错,一定把主容器重新拉起来。
   _oprf_admin() {
     local out rc
     docker compose stop oprf >/dev/null 2>&1
-    out="$(docker compose run --rm oprf "$@" 2>&1)"; rc=$?
-    docker compose start oprf >/dev/null 2>&1
+    # Clean up any leftover one-off admin container that could still hold the lock.
+    docker ps -aq --filter name=oprf-run 2>/dev/null | xargs -r docker rm -f >/dev/null 2>&1
+    trap 'docker compose up -d oprf >/dev/null 2>&1' RETURN
+    out="$(docker compose run --rm -T oprf "$@" 2>&1)"; rc=$?
+    docker compose up -d oprf >/dev/null 2>&1
+    trap - RETURN
+    # Never leave the service down: if it didn't come back healthy, force a clean
+    # restart so highest-tier phones aren't locked out.
+    sleep 2
+    if ! docker compose ps --status running -q oprf 2>/dev/null | grep -q .; then
+      warn "$(L "OPRF service didn't come back — forcing a clean restart…" "OPRF 服务没能自动恢复 —— 正在强制干净重启…")"
+      oprf_repair
+    fi
     printf '%s' "$out"
     return $rc
   }
@@ -520,7 +539,8 @@ menu_oprf() {
     if [ "$on" = 1 ]; then
       echo "  1) $(L "MEMBER EMERGENCY RESPONSE (detained: freeze / release / destroy)" "【成员应急处置】(成员被拘捕:冻结 / 解冻 / 销毁)")"
       echo "  2) $(L "Logs" 查看日志)"
-      echo "  3) $(L "Turn OFF (phones fall back to PIN + hardware only)" "关闭(手机退回仅 PIN + 硬件加密)")"
+      echo "  3) $(L "RESTART / REPAIR service (if phones can't unlock / 502)" "重启 / 修复服务(手机解不了锁 / 502 时)")"
+      echo "  4) $(L "Turn OFF (phones fall back to PIN + hardware only)" "关闭(手机退回仅 PIN + 硬件加密)")"
     else
       echo "  1) $(L "Turn ON" 开启)"
     fi
@@ -533,7 +553,8 @@ menu_oprf() {
            return
          fi ;;
       2) [ "$on" = 1 ] && { docker compose logs --tail 50 oprf 2>/dev/null || true; } ;;
-      3) [ "$on" = 1 ] || continue
+      3) [ "$on" = 1 ] && oprf_repair ;;
+      4) [ "$on" = 1 ] || continue
          [ -f "$SELF_BIN" ] && INSTALL_DIR="$INSTALL_DIR" bash "$SELF_BIN" disable-oprf || warn "$(L "script copy missing" "缺少脚本副本")"
          return ;;
       0|"") return ;;
@@ -697,6 +718,21 @@ px_dir()      { echo "$INSTALL_DIR/xray"; }
 px_clients()  { echo "$INSTALL_DIR/xray/clients.tsv"; }
 px_enabled()  { [ "$(env_saved ENABLE_PROXY)" = "1" ]; }
 oprf_enabled(){ [ "$(env_saved ENABLE_OPRF)" = "1" ]; }
+
+# 强杀所有卡住的 oprf 容器(释放 sled 锁)并起一个干净的。绝不碰数据库文件,只动容器。
+# 用于:管理操作后没自动恢复、或容器崩溃循环时的一键自救。
+oprf_repair() {
+  cd "$INSTALL_DIR" 2>/dev/null || return 1
+  docker compose stop oprf >/dev/null 2>&1
+  docker ps -aq --filter name=oprf 2>/dev/null | xargs -r docker rm -f >/dev/null 2>&1
+  docker compose up -d oprf >/dev/null 2>&1
+  sleep 4
+  if docker compose ps --status running -q oprf 2>/dev/null | grep -q .; then
+    ok "$(L "OPRF service is running again." "OPRF 服务已恢复运行。")"
+  else
+    warn "$(L "Still down — check: docker compose logs --tail 20 oprf" "仍未恢复 —— 请查: docker compose logs --tail 20 oprf")"
+  fi
+}
 
 # ---- VeilX 加固:服务器辅助 PIN(OPRF)---------------------------------------
 # 在 $INSTALL_DIR/oprf 写出 Dockerfile + Rust 源码(由 compose 的 build: 编译)。
@@ -876,7 +912,20 @@ fn admin(db: &sled::Db, args: &[String]) {
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
     let env = |k: &str, d: &str| std::env::var(k).unwrap_or_else(|_| d.to_string());
-    let db = sled::open(env("DB", "/data/oprf.db")).expect("open db");
+    let db_path = env("DB", "/data/oprf.db");
+    // Don't panic-loop if an admin one-off container is briefly holding the lock:
+    // wait for it to release (up to ~30s) instead of crashing and restarting.
+    // A crash-loop here locks out EVERY highest-tier phone, so recover gracefully.
+    let db = {
+        let mut opened = None;
+        for _ in 0..60 {
+            match sled::open(&db_path) {
+                Ok(d) => { opened = Some(d); break; }
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(500)),
+            }
+        }
+        opened.expect("open db (lock still held after 30s)")
+    };
     // Local admin operations, run by the installer (see `admin`).
     if args.len() >= 2 && args[1].starts_with("--admin-") {
         admin(&db, &args);
@@ -1844,6 +1893,11 @@ if [ "${1:-}" = "oprf" ]; then
   INSTALL_DIR="${INSTALL_DIR:-/opt/tuwunel}"; SELF_BIN="${SELF_BIN:-$INSTALL_DIR/tuwunel-installer.sh}"
   [ -d "$INSTALL_DIR" ] || die "$(L "$INSTALL_DIR not found — install the server first" "找不到 $INSTALL_DIR —— 请先装服务器")"
   menu_oprf; exit 0
+fi
+if [ "${1:-}" = "oprf-repair" ]; then
+  INSTALL_DIR="${INSTALL_DIR:-/opt/tuwunel}"
+  [ -d "$INSTALL_DIR" ] || die "$(L "$INSTALL_DIR not found" "找不到 $INSTALL_DIR")"
+  oprf_repair; exit 0
 fi
 if [ "${1:-}" = "privacy" ]; then INSTALL_DIR="${INSTALL_DIR:-/opt/tuwunel}"; menu_privacy; exit 0; fi
 if [ "${1:-}" = "forget-secrets" ]; then INSTALL_DIR="${INSTALL_DIR:-/opt/tuwunel}"; menu_forget_secrets; exit 0; fi
