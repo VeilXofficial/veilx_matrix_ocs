@@ -287,6 +287,7 @@ menu_status() {
   cd "$INSTALL_DIR"
   local d asub; d="$(env_saved MATRIX_DOMAIN)"; asub="$(env_saved ADMIN_SUB)"; asub="${asub:-admin}"
   echo ""; echo "$(L "── Current config ──" "── 当前配置 ──")"
+  echo "  $(L Hardening 加固): $([ "$(env_saved ENABLE_OPRF)" = "1" ] && L "server-assisted PIN ON" "服务器辅助PIN 已开" || L "off" 未开)"
   echo "  $(L Domain 域名): ${d:-$(L unknown 未知)}   $(L Reg 注册): $(env_saved REG_MODE)   $(L Federation 联邦): $([ "$(env_saved ENABLE_FEDERATION)" = "1" ] && L on 开 || L off 关)   $(L Calls 通话): $([ "$(env_saved ENABLE_CALLS)" = "1" ] && L on 开 || L off 关)   $(L Web 网页): $([ "$(env_saved ENABLE_WEB)" = "1" ] && L on 开 || L off 关)   $(L Admin 后台): $([ "$(env_saved ENABLE_ADMIN)" = "1" ] && L on 开 || L off 关)   $(L Big-files 大文件): $(human "$(env_saved MAX_UPLOAD_BYTES)")"
   [ "$(env_saved ENABLE_WEB)" = "1" ] && echo "  $(L "Web client:" "网页客户端:") https://${d}$(L "(members register/log in in a browser)" "(成员浏览器直接注册/登录)")"
   [ "$(env_saved ENABLE_ADMIN)" = "1" ] && echo "  $(L "Admin panel:" "管理后台: ") https://${asub}.${d}$(L "(admin user/password login, graphical management)" "(管理员账号密码登录,图形化管理)")"
@@ -389,6 +390,58 @@ menu_forget_secrets() {
   echo ""; echo "$(L "==> Running fstrim (hints the SSD to reclaim freed blocks; not a guaranteed wipe)…" "==> 触发 fstrim(提示 SSD 回收已释放块;非保证擦除)…")"
   fstrim -av 2>/dev/null || fstrim / 2>/dev/null || warn "$(L "fstrim unavailable (virtual disk may not support it)" "fstrim 不可用(虚拟盘可能不支持)")"
   echo "$(L "  Note: deletion on SSD/VPS is not a guaranteed physical wipe; the only reliable destruction is LUKS crypto-erase or destroying the disk." "  注:SSD/VPS 上删除不保证物理擦除;彻底销毁只能靠 LUKS 加密擦除或销毁磁盘。")"
+}
+
+# VeilX 加固(服务器辅助 PIN):状态 / 开关 / 远程销毁某成员的密钥。
+menu_oprf() {
+  cd "$INSTALL_DIR" 2>/dev/null || { warn "$(L "Deployment directory not found" "未找到部署目录")"; return; }
+  local D; D="$(env_saved MATRIX_DOMAIN)"
+  while :; do
+    local on running
+    oprf_enabled && on=1 || on=0
+    running=$(docker compose ps --status running -q oprf 2>/dev/null | grep -c . || echo 0)
+    printf '\n%s\n' "$(L "── VeilX hardening: server-assisted PIN ──" "── VeilX 加固:服务器辅助 PIN ──")"
+    printf '%s\n' "$(L '
+  What it does: VeilX phones must ask THIS server to unlock. So a seized phone that
+  is OFFLINE can never be brute-forced, and you can destroy a detained member’s key
+  so their phone becomes permanently unopenable. It never sees anyone’s PIN.' '
+  作用:VeilX 手机解锁时必须问【这台服务器】。于是被抄走且【离线】的手机永远无法爆破
+  PIN;成员被抓时你可销毁其密钥,让那台手机永久打不开。它全程看不到任何人的 PIN。')"
+    echo ""
+    echo "  $(L Status 状态): $([ "$on" = 1 ] && L "ON" "已开启" || L "OFF" "未开启")   $(L Container 容器): $([ "$running" -gt 0 ] && L running 运行中 || L "not running" 未运行)"
+    [ "$on" = 1 ] && echo "  $(L "Client endpoint (the app finds this automatically)" "客户端端点(App 会自动找到)"): https://matrix.$D/oprf/"
+    echo ""
+    if [ "$on" = 1 ]; then
+      echo "  1) $(L "Turn OFF (phones fall back to PIN + hardware only)" "关闭(手机退回仅 PIN + 硬件加密)")"
+      echo "  2) $(L "Destroy a member's key (their phone becomes permanently unopenable)" "销毁某成员的密钥(其手机永久打不开)")"
+      echo "  3) $(L "Logs" 查看日志)"
+    else
+      echo "  1) $(L "Turn ON" 开启)"
+    fi
+    echo "  0) $(L Back 返回)"
+    local R=""; if [ -t 0 ]; then read -rp "$(L "Select: " "请选择: ")" R || return; else read -rp "$(L "Select: " "请选择: ")" R < /dev/tty 2>/dev/null || return; fi
+    case "$R" in
+      1) if [ "$on" = 1 ]; then
+           [ -f "$SELF_BIN" ] && INSTALL_DIR="$INSTALL_DIR" bash "$SELF_BIN" disable-oprf || warn "$(L "script copy missing" "缺少脚本副本")"
+         else
+           [ -f "$SELF_BIN" ] && INSTALL_DIR="$INSTALL_DIR" bash "$SELF_BIN" enable-oprf || warn "$(L "script copy missing" "缺少脚本副本")"
+         fi; return ;;
+      2) [ "$on" = 1 ] || continue
+         local acct=""; read -rp "$(L "Full user id (e.g. @li:$D): " "完整用户 id(如 @li:$D): ")" acct || continue
+         [ -n "$acct" ] || continue
+         warn "$(L "This is IRREVERSIBLE: even the correct PIN will never open $acct's phone again." "此操作不可逆:之后连正确的 PIN 也永远打不开 $acct 的手机。")"
+         local c=""; read -rp "$(L "Type yes to confirm: " "输入 yes 确认: ")" c || continue
+         [ "$c" = yes ] || { echo "$(L Cancelled 已取消)"; continue; }
+         # sled 单进程独占:先停容器,用一次性容器打 tombstone,再起回来。
+         docker compose stop oprf >/dev/null 2>&1
+         if docker compose run --rm oprf --admin-kill "$acct" >/dev/null 2>&1; then
+           ok "$(L "Destroyed. $acct's phones can no longer be unlocked." "已销毁。$acct 的手机再也无法解锁。")"
+         else warn "$(L "Failed — check: docker compose logs oprf" "失败 —— 请查: docker compose logs oprf")"; fi
+         docker compose start oprf >/dev/null 2>&1 ;;
+      3) docker compose logs --tail 50 oprf 2>/dev/null || true ;;
+      0|"") return ;;
+    esac
+  done
 }
 
 # ---- 自动定时加密备份(可选;配置编进 cron 行,不污染 .env)----
@@ -546,6 +599,146 @@ XRAY_IMAGE="${XRAY_IMAGE:-ghcr.io/xtls/xray-core:latest}"
 px_dir()      { echo "$INSTALL_DIR/xray"; }
 px_clients()  { echo "$INSTALL_DIR/xray/clients.tsv"; }
 px_enabled()  { [ "$(env_saved ENABLE_PROXY)" = "1" ]; }
+oprf_enabled(){ [ "$(env_saved ENABLE_OPRF)" = "1" ]; }
+
+# ---- VeilX 加固:服务器辅助 PIN(OPRF)---------------------------------------
+# 在 $INSTALL_DIR/oprf 写出 Dockerfile + Rust 源码(由 compose 的 build: 编译)。
+# 协议 ristretto255 2HashDH:客户端发盲化点 B=r·P,服务端回 E=k·B,客户端解盲得 k·P。
+# 服务端全程看不到 PIN;k 只存在本机 sled 库里,永不下发。
+oprf_write_files() {
+  mkdir -p oprf/src data/oprf
+  chown -R 10001:10001 data/oprf 2>/dev/null || true
+  cat > oprf/Dockerfile <<'EOF'
+FROM rust:1-slim AS build
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY Cargo.toml ./
+COPY src ./src
+RUN cargo build --release
+
+FROM debian:stable-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=build /src/target/release/veilx-oprf-guard /usr/local/bin/veilx-oprf-guard
+USER 10001:10001
+ENTRYPOINT ["/usr/local/bin/veilx-oprf-guard"]
+EOF
+  cat > oprf/Cargo.toml <<'EOF'
+[package]
+name = "veilx-oprf-guard"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axum = "0.7"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+curve25519-dalek = { version = "4.1", features = ["rand_core"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+sled = "0.34"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+[profile.release]
+strip = true
+EOF
+  cat > oprf/src/main.rs <<'EOF'
+//! VeilX OPRF guard — server half of the server-assisted PIN.
+use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
+use base64::{engine::general_purpose::STANDARD as B64, Engine};
+use curve25519_dalek::{ristretto::CompressedRistretto, scalar::Scalar};
+use rand_core::OsRng;
+use serde::{Deserialize, Serialize};
+use std::{sync::Arc, time::{SystemTime, UNIX_EPOCH}};
+
+#[derive(Clone)]
+struct App { db: sled::Db, http: reqwest::Client, homeserver: String, rate_limit: u32, rate_window: u64 }
+#[derive(Serialize, Deserialize)]
+struct Record { k: [u8; 32], window_start: u64, count: u32, killed: bool }
+#[derive(Deserialize)] struct EvalReq { account: String, blinded: String }
+#[derive(Serialize)]   struct EvalResp { evaluated: String }
+#[derive(Deserialize)] struct KillReq { account: String }
+
+fn now() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() }
+
+/// The bearer token must belong to `account` — verified against the homeserver.
+async fn verify(app: &App, headers: &axum::http::HeaderMap, account: &str) -> bool {
+    let Some(tok) = headers.get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok()).and_then(|s| s.strip_prefix("Bearer ")) else { return false };
+    let url = format!("{}/_matrix/client/v3/account/whoami", app.homeserver.trim_end_matches('/'));
+    let Ok(resp) = app.http.get(&url).bearer_auth(tok).send().await else { return false };
+    if !resp.status().is_success() { return false }
+    let Ok(body) = resp.json::<serde_json::Value>().await else { return false };
+    body.get("user_id").and_then(|v| v.as_str()) == Some(account)
+}
+
+async fn eval(State(app): State<Arc<App>>, headers: axum::http::HeaderMap, Json(req): Json<EvalReq>)
+    -> Result<Json<EvalResp>, StatusCode> {
+    if !verify(&app, &headers, &req.account).await { return Err(StatusCode::UNAUTHORIZED) }
+    let raw = B64.decode(req.blinded.as_bytes()).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let point = CompressedRistretto::from_slice(&raw).map_err(|_| StatusCode::BAD_REQUEST)?
+        .decompress().ok_or(StatusCode::BAD_REQUEST)?;
+    let key = req.account.as_bytes();
+    let mut rec: Record = match app.db.get(key).ok().flatten() {
+        Some(b) => serde_json::from_slice(&b).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+        None => Record { k: Scalar::random(&mut OsRng).to_bytes(), window_start: now(), count: 0, killed: false },
+    };
+    if rec.killed { return Err(StatusCode::GONE) }
+    let t = now();
+    if t.saturating_sub(rec.window_start) >= app.rate_window { rec.window_start = t; rec.count = 0 }
+    if rec.count >= app.rate_limit {
+        let _ = app.db.insert(key, serde_json::to_vec(&rec).unwrap());
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
+    rec.count += 1;
+    let k: Scalar = Option::from(Scalar::from_canonical_bytes(rec.k)).ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let evaluated = (point * k).compress().to_bytes();
+    app.db.insert(key, serde_json::to_vec(&rec).unwrap()).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let _ = app.db.flush_async().await;
+    Ok(Json(EvalResp { evaluated: B64.encode(evaluated) }))
+}
+
+/// Destroy this account's k — its phones become permanently unopenable.
+async fn kill(State(app): State<Arc<App>>, headers: axum::http::HeaderMap, Json(req): Json<KillReq>) -> StatusCode {
+    if !verify(&app, &headers, &req.account).await { return StatusCode::UNAUTHORIZED }
+    let rec = Record { k: [0u8; 32], window_start: now(), count: 0, killed: true };
+    let _ = app.db.insert(req.account.as_bytes(), serde_json::to_vec(&rec).unwrap());
+    let _ = app.db.flush_async().await;
+    StatusCode::NO_CONTENT
+}
+
+#[tokio::main]
+async fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let env = |k: &str, d: &str| std::env::var(k).unwrap_or_else(|_| d.to_string());
+    let db = sled::open(env("DB", "/data/oprf.db")).expect("open db");
+    // Local admin kill, run by the installer: `--admin-kill @user:server`.
+    if args.len() == 3 && args[1] == "--admin-kill" {
+        let rec = Record { k: [0u8; 32], window_start: now(), count: 0, killed: true };
+        db.insert(args[2].as_bytes(), serde_json::to_vec(&rec).unwrap()).unwrap();
+        db.flush().unwrap();
+        eprintln!("killed {}", args[2]);
+        return;
+    }
+    let app = Arc::new(App {
+        db, http: reqwest::Client::new(),
+        homeserver: env("HOMESERVER", "http://tuwunel:8008"),
+        rate_limit: env("RATE_LIMIT", "12").parse().unwrap_or(12),
+        rate_window: env("RATE_WINDOW_SECS", "3600").parse().unwrap_or(3600),
+    });
+    let bind = env("BIND", "0.0.0.0:8787");
+    let router = Router::new()
+        .route("/oprf/eval", post(eval))
+        .route("/oprf/kill", post(kill))
+        .with_state(app);
+    let listener = tokio::net::TcpListener::bind(&bind).await.expect("bind");
+    eprintln!("veilx-oprf-guard listening on {bind}");
+    axum::serve(listener, router).await.unwrap();
+}
+EOF
+}
 
 # 在 .env 里写/改一个键(不重写整个文件,供子命令单独调用)
 # 用 awk 而非 sed:值里可能含 | & \ 等 sed 替换串的元字符(域名列表、dest 的
@@ -1485,6 +1678,13 @@ if [ "${1:-}" = "proxy" ]; then
   exit 0
 fi
 
+if [ "${1:-}" = "enable-oprf" ];  then ENABLE_OPRF=1; RECONFIG=1; set --; fi
+if [ "${1:-}" = "disable-oprf" ]; then ENABLE_OPRF=0; RECONFIG=1; set --; fi
+if [ "${1:-}" = "oprf" ]; then
+  INSTALL_DIR="${INSTALL_DIR:-/opt/tuwunel}"; SELF_BIN="${SELF_BIN:-$INSTALL_DIR/tuwunel-installer.sh}"
+  [ -d "$INSTALL_DIR" ] || die "$(L "$INSTALL_DIR not found — install the server first" "找不到 $INSTALL_DIR —— 请先装服务器")"
+  menu_oprf; exit 0
+fi
 if [ "${1:-}" = "privacy" ]; then INSTALL_DIR="${INSTALL_DIR:-/opt/tuwunel}"; menu_privacy; exit 0; fi
 if [ "${1:-}" = "forget-secrets" ]; then INSTALL_DIR="${INSTALL_DIR:-/opt/tuwunel}"; menu_forget_secrets; exit 0; fi
 # 子命令: lang —— 切换脚本界面语言(English / 简体中文),写进 .env 持久化(装好后随时可改)
@@ -1571,6 +1771,7 @@ if [ "$RECONFIG" -eq 0 ] && [ -f "$INSTALL_DIR/CREDENTIALS.txt" ] \
   b) $(L "Scheduled encrypted backup (optional: weekly auto, with rotation/skip-if-full)" "自动定时加密备份(可选:开启后每周自动,含轮转/满盘跳过)")
   a) $(L "Change admin panel URL (admin. → another subdomain)" "修改后台网址(admin. → 别的子域)")
   x) $(L "VeilX dedicated proxy (anti-censorship; link + QR for the app)" "VeilX 专用代理(抗封锁;给 App 出链接+二维码)")$([ "$(env_saved ENABLE_PROXY)" = "1" ] && L "  [ON]" "  [已开启]")
+  o) $(L "VeilX hardening: server-assisted PIN (seized offline phones can't be cracked)" "VeilX 加固:服务器辅助 PIN(被抄走的离线手机无法破解)")$([ "$(env_saved ENABLE_OPRF)" = "1" ] && L "  [ON]" "  [已开启]")
   L) $(L "Switch interface language → 中文" "切换界面语言 → English")   (语言 / Language)
   0) $(L Exit 退出)
 EOF
@@ -1598,6 +1799,7 @@ EOF
         10) [ -f "$SELF_BIN" ] && INSTALL_DIR="$INSTALL_DIR" bash "$SELF_BIN" uninstall || warn "$(L "script copy missing" "缺少脚本副本")"
            [ -d "$INSTALL_DIR" ] || exit 0 ;;
         x|X) menu_proxy ;;
+        o|O) menu_oprf ;;
         p|P) menu_privacy ;;
         s|S) menu_forget_secrets ;;
         b|B) menu_autobackup ;;
@@ -1662,7 +1864,7 @@ bold "$(L "Target: $DOMAIN  →  server ${PUBLIC_IP:-unknown}  →  dir $INSTALL
 # ---------------------------------------------------------------------
 # 选项(回车=推荐默认;重跑沿用;环境变量可预设)
 # ---------------------------------------------------------------------
-EXPLICIT=0; [ -n "${REG_MODE:-}${ENABLE_FEDERATION:-}${ENABLE_CALLS:-}${ENABLE_WEB:-}${ENABLE_ADMIN:-}${ENABLE_ELEMENTX:-}${ENABLE_PRIVACY:-}${PRIVACY:-}${MAX_UPLOAD:-}${_ADMIN_SUB_ENV:-}" ] && EXPLICIT=1
+EXPLICIT=0; [ -n "${REG_MODE:-}${ENABLE_FEDERATION:-}${ENABLE_CALLS:-}${ENABLE_WEB:-}${ENABLE_ADMIN:-}${ENABLE_ELEMENTX:-}${ENABLE_PRIVACY:-}${PRIVACY:-}${MAX_UPLOAD:-}${_ADMIN_SUB_ENV:-}${ENABLE_OPRF:-}" ] && EXPLICIT=1
 REG_MODE="${REG_MODE:-$(env_saved REG_MODE)}"
 ENABLE_FEDERATION="${ENABLE_FEDERATION:-$(env_saved ENABLE_FEDERATION)}"
 ENABLE_CALLS="${ENABLE_CALLS:-$(env_saved ENABLE_CALLS)}"
@@ -1670,11 +1872,12 @@ ENABLE_WEB="${ENABLE_WEB:-$(env_saved ENABLE_WEB)}"   # 自托管 Element Web �
 ENABLE_ADMIN="${ENABLE_ADMIN:-$(env_saved ENABLE_ADMIN)}"   # 自托管 Ketesa Web 管理后台(admin.你的域名)
 ENABLE_ELEMENTX="${ENABLE_ELEMENTX:-$(env_saved ENABLE_ELEMENTX)}"   # Element X 手机App自助注册(tuwunel原生OIDC;默认开)
 ENABLE_PRIVACY="${PRIVACY:-${ENABLE_PRIVACY:-$(env_saved ENABLE_PRIVACY)}}"   # 隐私加固/元数据最小化(默认开)
+ENABLE_OPRF="${ENABLE_OPRF:-$(env_saved ENABLE_OPRF)}"   # VeilX 加固:服务器辅助 PIN(OPRF),让被抄走的离线手机无法爆破 PIN
 USE_CDN="${CDN:-$(env_saved USE_CDN)}"   # 服务器前是否有 Cloudflare/CDN 代理(影响 DNS 预检与提示;不改生成的配置)
 MAX_UPLOAD="${MAX_UPLOAD:-}"
 SAVED_BYTES="$(env_saved MAX_UPLOAD_BYTES)"
 
-DEF_REG=1; DEF_FED=N; DEF_CALL=n; DEF_WEB=Y; DEF_ADMIN=Y
+DEF_REG=1; DEF_FED=N; DEF_CALL=n; DEF_WEB=Y; DEF_ADMIN=Y; DEF_OPRF=Y
 if [ "$RECONFIG" -eq 1 ] && [ "$EXPLICIT" -eq 0 ]; then
   has_tty || die "$(L "config needs an interactive terminal; or use env vars: ENABLE_CALLS=1 sudo -E bash tuwunel-installer.sh config" "config 需交互终端;或用环境变量: ENABLE_CALLS=1 sudo -E bash tuwunel-installer.sh config")"
   case "$REG_MODE" in open) DEF_REG=2;; *) DEF_REG=1;; esac
@@ -1682,16 +1885,17 @@ if [ "$RECONFIG" -eq 1 ] && [ "$EXPLICIT" -eq 0 ]; then
   [ "$ENABLE_CALLS" = "1" ] && DEF_CALL=Y || DEF_CALL=n
   [ "$ENABLE_WEB" = "0" ] && DEF_WEB=n || DEF_WEB=Y
   [ "$ENABLE_ADMIN" = "0" ] && DEF_ADMIN=n || DEF_ADMIN=Y
+  [ "$ENABLE_OPRF" = "1" ] && DEF_OPRF=Y || DEF_OPRF=n
   echo ""; echo "$(L "Current" "当前"): $(L Reg 注册)[$REG_MODE] · $(L Federation 联邦)[$([ "$ENABLE_FEDERATION" = "1" ] && L on 开 || L off 关)] · $(L Calls 通话)[$([ "$ENABLE_CALLS" = "1" ] && L on 开 || L off 关)] · $(L Web 网页客户端)[$([ "$ENABLE_WEB" = "1" ] && L on 开 || L off 关)] · $(L Admin 管理后台)[$([ "$ENABLE_ADMIN" = "1" ] && L on 开 || L off 关)] · $(L Big-files 大文件)[$(human "${SAVED_BYTES:-4294967296}")]"
   echo "$(L "Press Enter = keep current value." "直接回车 = 保持当前值。")"
-  REG_MODE=""; ENABLE_FEDERATION=""; ENABLE_CALLS=""; ENABLE_WEB=""; ENABLE_ADMIN=""
+  REG_MODE=""; ENABLE_FEDERATION=""; ENABLE_CALLS=""; ENABLE_WEB=""; ENABLE_ADMIN=""; ENABLE_OPRF=""
 fi
 
-if has_tty && { [ -z "$REG_MODE" ] || [ -z "$ENABLE_FEDERATION" ] || [ -z "$ENABLE_CALLS" ] || [ -z "$ENABLE_WEB" ] || [ -z "$ENABLE_ADMIN" ]; }; then
+if has_tty && { [ -z "$REG_MODE" ] || [ -z "$ENABLE_FEDERATION" ] || [ -z "$ENABLE_CALLS" ] || [ -z "$ENABLE_WEB" ] || [ -z "$ENABLE_ADMIN" ] || [ -z "$ENABLE_OPRF" ]; }; then
   printf '\n%s%s%s\n' "$C_B$C_CYAN" "$(L "Install options: unsure? just press Enter for the recommended (already the most private, safest) values." "安装选项:看不懂就直接回车用推荐值(已是私密最安全组合)。")" "$C_RESET"
 
   if [ -z "$REG_MODE" ]; then
-    printf '\n%s%s%s\n' "$C_B$C_CYAN" "$(L "[Option 1/6] Who can register" "【选项 1/6】谁能注册账号")" "$C_RESET"
+    printf '\n%s%s%s\n' "$C_B$C_CYAN" "$(L "[Option 1/7] Who can register" "【选项 1/7】谁能注册账号")" "$C_RESET"
     printf '%s\n' "$(L "  [1] Invite token required (recommended) — only people you give the token to can register; the first registrant becomes admin.
   [2] Fully open — anyone can register (very risky; do not use for business)." "  [1] 需注册令牌(推荐)—— 只有拿到你发的令牌的人才能注册;首个注册者=管理员。
   [2] 完全开放 —— 任何人都能注册(风险极高,商用勿选)。")"
@@ -1700,7 +1904,7 @@ if has_tty && { [ -z "$REG_MODE" ] || [ -z "$ENABLE_FEDERATION" ] || [ -z "$ENAB
   fi
 
   if [ -z "$ENABLE_FEDERATION" ]; then
-    printf '\n%s%s%s\n' "$C_B$C_CYAN" "$(L "[Option 2/6] Federation (connect to the external Matrix world)" "【选项 2/6】联邦互通(与外部 Matrix 世界相连)")" "$C_RESET"
+    printf '\n%s%s%s\n' "$C_B$C_CYAN" "$(L "[Option 2/7] Federation (connect to the external Matrix world)" "【选项 2/7】联邦互通(与外部 Matrix 世界相连)")" "$C_RESET"
     printf '%s\n' "$(L "  [N] Off (recommended) — an island; outsiders cannot message your members. Smallest attack surface, best for confidentiality.
   [y] On — can interoperate with matrix.org etc., but larger exposure." "  [N] 关闭(推荐)—— 孤岛,外人无法向你的成员发消息,攻击面最小,商密首选。
   [y] 开启 —— 可与 matrix.org 等互通,暴露面变大。")"
@@ -1709,7 +1913,7 @@ if has_tty && { [ -z "$REG_MODE" ] || [ -z "$ENABLE_FEDERATION" ] || [ -z "$ENAB
   fi
 
   if [ -z "$ENABLE_CALLS" ]; then
-    printf '\n%s%s%s\n' "$C_B$C_CYAN" "$(L "[Option 3/6] Voice/video calls (Element Call)" "【选项 3/6】语音/视频通话(Element Call)")" "$C_RESET"
+    printf '\n%s%s%s\n' "$C_B$C_CYAN" "$(L "[Option 3/7] Voice/video calls (Element Call)" "【选项 3/7】语音/视频通话(Element Call)")" "$C_RESET"
     printf '%s\n' "$(L "  [n] Off (recommended first) — natively supported, but the call path is newer; get chat + big files stable first.
   [Y] On — also installs LiveKit + lk-jwt; needs two extra DNS records (livekit. / matrix-rtc.) and ports 7881/7882." "  [n] 关闭(推荐先关)—— tuwunel 原生支持,但通话链路较新;先跑稳聊天+大文件。
   [Y] 开启 —— 额外装 LiveKit + lk-jwt,需再加 livekit. / matrix-rtc. 两条 DNS 和 7881/7882 端口。")"
@@ -1718,7 +1922,7 @@ if has_tty && { [ -z "$REG_MODE" ] || [ -z "$ENABLE_FEDERATION" ] || [ -z "$ENAB
   fi
 
   if [ -z "$ENABLE_WEB" ]; then
-    printf '\n%s%s%s\n' "$C_B$C_CYAN" "$(L "[Option 4/6] Web client on your own domain (Element Web)" "【选项 4/6】自家域名网页客户端(Element Web)")" "$C_RESET"
+    printf '\n%s%s%s\n' "$C_B$C_CYAN" "$(L "[Option 4/7] Web client on your own domain (Element Web)" "【选项 4/7】自家域名网页客户端(Element Web)")" "$C_RESET"
     printf '%s\n' "$(L "  [Y] On (recommended) — host a web Element on your OWN domain: members open
        https://your-domain to register, log in and chat — no element.io, no app.
        Locked to your server, white-labelable; no extra DNS (uses root domain). ~30MB RAM.
@@ -1731,7 +1935,7 @@ if has_tty && { [ -z "$REG_MODE" ] || [ -z "$ENABLE_FEDERATION" ] || [ -z "$ENAB
   fi
 
   if [ -z "$ENABLE_ADMIN" ]; then
-    printf '\n%s%s%s\n' "$C_B$C_CYAN" "$(L "[Option 5/6] Web admin panel (Ketesa graphical panel)" "【选项 5/6】Web 管理后台(Ketesa 图形面板)")" "$C_RESET"
+    printf '\n%s%s%s\n' "$C_B$C_CYAN" "$(L "[Option 5/7] Web admin panel (Ketesa graphical panel)" "【选项 5/7】Web 管理后台(Ketesa 图形面板)")" "$C_RESET"
     printf '%s\n' "$(L "  [Y] On (recommended) — host a mature graphical admin panel at admin.your-domain
        (Ketesa, officially supported by tuwunel): manage users, issue/revoke invite codes,
        view rooms/media, deactivate accounts, reset passwords — all in a browser, no commands.
@@ -1757,7 +1961,7 @@ if has_tty && { [ -z "$REG_MODE" ] || [ -z "$ENABLE_FEDERATION" ] || [ -z "$ENAB
   fi
 
   if [ -z "$MAX_UPLOAD" ]; then
-    printf '\n%s%s%s\n' "$C_B$C_CYAN" "$(L "[Option 6/6] Max file size (send big files/photos/long videos)" "【选项 6/6】单文件上限(发大文件/大图/长视频)")" "$C_RESET"
+    printf '\n%s%s%s\n' "$C_B$C_CYAN" "$(L "[Option 6/7] Max file size (send big files/photos/long videos)" "【选项 6/7】单文件上限(发大文件/大图/长视频)")" "$C_RESET"
     echo "$(L "  Set any size (e.g. 4G / 4.5G / 512M / 1T); bigger uses more disk. Enter = 4G." "  设多大都行(如 4G / 4.5G / 512M / 1T);越大越占磁盘。回车=4G。")"
     while :; do
       ask_opt "$(L "→ Max file size [Enter=$(human "${SAVED_BYTES:-4294967296}")]: " "→ 单文件上限 [回车=$(human "${SAVED_BYTES:-4294967296}")]: ")" "${SAVED_BYTES:+$(human "$SAVED_BYTES")}"
@@ -1767,12 +1971,29 @@ if has_tty && { [ -z "$REG_MODE" ] || [ -z "$ENABLE_FEDERATION" ] || [ -z "$ENAB
       has_tty || { MAX_UPLOAD="4G"; break; }
     done
   fi
+
+  if [ -z "$ENABLE_OPRF" ]; then
+    printf '\n%s%s%s\n' "$C_B$C_CYAN" "$(L "[Option 7/7] VeilX hardening: server-assisted PIN" "【选项 7/7】VeilX 加固:服务器辅助 PIN")" "$C_RESET"
+    printf '%s\n' "$(L "  [Y] On (recommended) — a tiny extra service on THIS server. VeilX phones then need
+       it to unlock, which means: a seized phone that is OFFLINE can never be
+       brute-forced, and you can remotely destroy a detained member's key so their
+       phone becomes permanently unopenable. No new domain/DNS/cert needed.
+       Adds ~2-5 min to install (compiles once) and ~30MB RAM.
+  [n] Off — phones still use PIN + hardware encryption, just without this extra layer." "  [Y] 开启(推荐)—— 在【这台服务器】上多跑一个很小的服务。VeilX 手机解锁时要问它,
+       于是:被抄走且【离线】的手机永远无法爆破 PIN;成员被抓时你可远程销毁其密钥,
+       让那台手机永久打不开。不需要新域名/新 DNS/新证书。
+       安装多花约 2-5 分钟(只编译一次),多占约 30MB 内存。
+  [n] 关闭 —— 手机仍有 PIN + 硬件加密,只是少这一层。")"
+    ask_opt "$(L "→ [Y/n, Enter=$DEF_OPRF]: " "→ [Y/n,回车=$DEF_OPRF]: ")" "$DEF_OPRF"
+    case "$REPLY" in n|N) ENABLE_OPRF=0;; *) ENABLE_OPRF=1;; esac
+  fi
 fi
 REG_MODE="${REG_MODE:-token}"; ENABLE_FEDERATION="${ENABLE_FEDERATION:-0}"; ENABLE_CALLS="${ENABLE_CALLS:-0}"; ENABLE_WEB="${ENABLE_WEB:-1}"; ENABLE_ADMIN="${ENABLE_ADMIN:-1}"
 case "$ENABLE_FEDERATION" in 1) :;; *) ENABLE_FEDERATION=0;; esac
 case "$ENABLE_CALLS" in 1) :;; *) ENABLE_CALLS=0;; esac
 case "$ENABLE_WEB" in 0) :;; *) ENABLE_WEB=1;; esac
 case "$ENABLE_ADMIN" in 0) :;; *) ENABLE_ADMIN=1;; esac
+ENABLE_OPRF="${ENABLE_OPRF:-1}"; case "$ENABLE_OPRF" in 0) :;; *) ENABLE_OPRF=1;; esac
 case "$ENABLE_ELEMENTX" in 0) :;; *) ENABLE_ELEMENTX=1;; esac
 case "$ENABLE_PRIVACY" in 0) :;; *) ENABLE_PRIVACY=1;; esac
 case "$REG_MODE" in token|open) :;; *) REG_MODE=token;; esac
@@ -1962,6 +2183,7 @@ ENABLE_ADMIN=$ENABLE_ADMIN
 ADMIN_SUB=$ADMIN_SUB
 ENABLE_ELEMENTX=$ENABLE_ELEMENTX
 ENABLE_PRIVACY=$ENABLE_PRIVACY
+ENABLE_OPRF=$ENABLE_OPRF
 ENABLE_PROXY=$ENABLE_PROXY
 PROXY_PORT=$PROXY_PORT
 PROXY_DEST=$PROXY_DEST
@@ -2170,6 +2392,31 @@ cat >> docker-compose.yml <<'EOF'
 EOF
 fi
 
+# VeilX 加固:服务器辅助 PIN(OPRF)。保管每账号的 ristretto255 密钥 k,对客户端盲化点算 k·B。
+# 它看不到 PIN、不下发 k;因为解锁必须问它,被抄走且离线的手机就无法爆破 PIN。
+if [ "$ENABLE_OPRF" = "1" ]; then
+  oprf_write_files
+cat >> docker-compose.yml <<'EOF'
+
+  oprf:
+    build: ./oprf
+    restart: unless-stopped
+    logging: *log
+    security_opt: ["no-new-privileges:true"]
+    depends_on: [tuwunel]
+    environment:
+      HOMESERVER: "http://tuwunel:8008"   # 容器内直连,校验 token 归属(不出网)
+      BIND: "0.0.0.0:8787"
+      DB: "/data/oprf.db"
+      RATE_LIMIT: "12"
+      RATE_WINDOW_SECS: "3600"
+    volumes:
+      - ./data/oprf:/data
+    mem_limit: 64m
+    networks: [internal]
+EOF
+fi
+
 cat >> docker-compose.yml <<'EOF'
 
   caddy:
@@ -2231,6 +2478,12 @@ else
 fi
 
 # ---- Caddyfile ----
+# OPRF 挂在 matrix.域名/oprf/ 这个路径上:复用现有证书,不需要新域名/新 DNS。
+if [ "$ENABLE_OPRF" = "1" ]; then
+  OPRF_ROUTE=$'\thandle /oprf/* {\n\t\treverse_proxy oprf:8787\n\t}'
+else
+  OPRF_ROUTE=""
+fi
 cat > Caddyfile <<EOF
 {
 	email $ACME_EMAIL
@@ -2282,6 +2535,7 @@ $M_HOST {
 			respond @ur \`{"user_reports":[],"total":0}\` 200
 		}
 	}
+$OPRF_ROUTE
 	handle {
 		reverse_proxy tuwunel:8008
 	}
@@ -2295,7 +2549,10 @@ else
 cat >> Caddyfile <<EOF
 
 $M_HOST {
-	reverse_proxy tuwunel:8008
+$OPRF_ROUTE
+	handle {
+		reverse_proxy tuwunel:8008
+	}
 }
 EOF
 fi
@@ -2356,6 +2613,21 @@ bold "$(L "6/6 Start up (first run pulls images, a few minutes)" "6/6 启动(首
 # compose 刚被重新生成,若 VeilX 代理是开启状态,需把 xray 段和 caddy 端口改动重新注入。
 if [ "$ENABLE_PROXY" = "1" ]; then px_apply_compose || warn "$(L "Failed to re-apply the VeilX proxy to docker-compose.yml" "重新注入 VeilX 代理到 docker-compose.yml 失败")"; fi
 [ "$RECONFIG" -eq 0 ] && docker compose pull -q || true
+# OPRF 先单独编译:它是唯一需要本地 build 的服务,失败不能连累整个 Matrix 起不来。
+# 编译失败 → 自动退回“未开启”并重生成编排/Caddy,保证聊天服务照常可用。
+if [ "$ENABLE_OPRF" = "1" ]; then
+  echo "$(L "Building the VeilX hardening service (first time compiles Rust, 2-5 min)…" "编译 VeilX 加固服务(首次编译 Rust,约 2-5 分钟)…")"
+  if docker compose build oprf; then
+    ok "$(L "VeilX hardening service built" "VeilX 加固服务编译完成")"
+  else
+    warn "$(L "Build failed — continuing WITHOUT the hardening service so chat still works. Retry later: sudo tuwunel oprf" "编译失败 —— 先不装加固服务,保证聊天正常。稍后可重试: sudo tuwunel oprf")"
+    ENABLE_OPRF=0
+    sed -i "s/^ENABLE_OPRF=.*/ENABLE_OPRF=0/" .env 2>/dev/null || true
+    # 把 oprf 服务段和 Caddy 路由摘掉(否则 up -d 仍会尝试 build 而失败)
+    awk '/^  oprf:$/{skip=1} skip && /^  [a-z]/ && !/^  oprf:$/{skip=0} !skip' docker-compose.yml > .dc.tmp && mv .dc.tmp docker-compose.yml
+    awk '/^\thandle \/oprf\/\* \{$/{skip=2} skip>0{if(/^\t\}$/)skip=0; next} {print}' Caddyfile > .cf.tmp && mv .cf.tmp Caddyfile
+  fi
+fi
 # up -d 不会因 Caddyfile(绑定挂载)内容变化而重启正在运行的 caddy,只创建新容器(如 ketesa)/启动停止的容器,故对运行中的站点安全。
 docker compose up -d --remove-orphans
 # 只有显式 restart caddy 才会让它重读 Caddyfile;Caddyfile 没过校验就跳过,保住老配置不中断。
