@@ -1,7 +1,16 @@
 #!/usr/bin/env bash
 # =====================================================================
-#  Matrix 轻量一键安装脚本 · tuwunel 版(通用版 t1.18)
-#  Matrix one-command installer · tuwunel edition (Universal t1.18)
+#  Matrix 轻量一键安装脚本 · tuwunel 版(通用版 t1.19)
+#  Matrix one-command installer · tuwunel edition (Universal t1.19)
+#  t1.19:【死手开关】服务器可远程让成员手机①冻结=加密上锁(可撤销)②销毁=永久不可解。
+#         指令用服务器的 Ed25519 私钥签名(/data/signing.key 首次启动自动生成,0600),
+#         客户端在启用最高档时固定公钥,**中间人无法伪造销毁指令去毁掉任意成员数据**。
+#         新增: GET /oprf/pubkey(公开)、POST /oprf/status(签名裁决 ok/frozen/killed)、
+#         `--admin-reap <天>` 失联自动收割(配 cron,人被抓无法上线时自动销毁)。
+#         限速 12→30 次/小时(客户端后台立即零化后解锁更频繁,12 会误伤正常使用)。
+#         修复: 应急处置里的"吊销登录会话"原用 `tuwunel --execute`,但服务器运行时
+#         RocksDB 被占锁必然失败;tuwunel 只能在【管理员房间】发 !admin 命令,
+#         现改为打印确切命令让运维执行,不再假装已完成。
 #  t1.18:【修复 OPRF 卡死/502】t1.17 的成员管理少了 docker compose run 的 -T,在 SSH 里
 #         会挂起、占着数据库锁,导致主容器崩溃循环、全队最高档手机被锁在外面。本版:
 #         ①run 一律加 -T + trap 兜底 + 管理后强制验证服务复活;②容器打不开锁时不再 panic
@@ -413,11 +422,18 @@ menu_oprf_members() {
   local D; D="$(env_saved MATRIX_DOMAIN)"
   # 处置时可顺带吊销该账号的 Matrix 登录会话:否则对方若在【已解锁+联网】状态下
   # 拿到手机,仍能用他的账号继续收发消息、看群里在说什么。
+  # tuwunel is administered from its ADMIN ROOM, not the CLI: `tuwunel --execute`
+  # cannot run while the server holds the RocksDB lock, so the old attempt here
+  # always failed. Deactivating is the operator's most urgent action (it removes
+  # the member from every room, which rotates the Megolm keys so the seized
+  # account stops receiving new messages), so spell out the exact command rather
+  # than pretend to have done it.
   _revoke_sessions() {
     local acct="$1"
-    docker compose exec -T tuwunel tuwunel-admin users deactivate "$acct" >/dev/null 2>&1 \
-      || docker compose exec -T tuwunel /usr/bin/tuwunel --execute "users deactivate $acct" >/dev/null 2>&1 \
-      || return 1
+    printf '\n%s\n' "$(L "  ACTION REQUIRED — in the admin room of your VeilX/Element client, send:" "  需要你手动执行 —— 在客户端的【管理员房间】里发送:")"
+    printf '      %s\n' "!admin users deactivate $acct"
+    printf '%s\n' "$(L "  This removes them from every room and rotates the encryption keys, so the seized account can no longer read new messages or impersonate them." "  这会把该账号踢出所有房间并轮换加密密钥,被查获的账号从此读不到新消息、也无法冒充该成员发言。")"
+    return 0
   }
   # sled 是单进程独占的:任何管理操作都必须先停服务容器,否则打不开数据库。
   # 停机时间约 1-2 秒;期间成员解锁会失败(会自动重试)。
@@ -485,7 +501,7 @@ menu_oprf_members() {
                ok "$(L "FROZEN: $acct can no longer unlock. Reversible — use 'Release' when safe." "已冻结:$acct 暂时无法解锁。可撤销 —— 人安全后用【解冻】。")"
                printf "%s" "$(L "  Also revoke their Matrix login sessions? [y/N]: " "  是否同时吊销他的 Matrix 登录会话? [y/N]: ")"
                read -r c || c=""
-               case "$c" in y|Y) _revoke_sessions "$acct" && ok "$(L "sessions revoked" 会话已吊销)" || warn "$(L "couldn't revoke automatically — do it in the admin panel" "自动吊销失败 —— 请到管理后台操作")";; esac
+               case "$c" in y|Y) _revoke_sessions "$acct";; esac
              else
                warn "$(L "NOT frozen — no such account, or it was already destroyed. Check the status list." "未能冻结 —— 没有这个账号,或已被销毁。请查看成员状态。")"
              fi ;;
@@ -502,7 +518,7 @@ menu_oprf_members() {
              else warn "$(L "Failed — check: docker compose logs oprf" "失败 —— 请查: docker compose logs oprf")"; fi
              printf "%s" "$(L "  Also revoke their Matrix login sessions? [Y/n]: " "  是否同时吊销他的 Matrix 登录会话? [Y/n]: ")"
              read -r c || c=""
-             case "$c" in n|N) :;; *) _revoke_sessions "$acct" && ok "$(L "sessions revoked" 会话已吊销)" || warn "$(L "couldn't revoke automatically — do it in the admin panel" "自动吊销失败 —— 请到管理后台操作")";; esac ;;
+             case "$c" in n|N) :;; *) _revoke_sessions "$acct";; esac ;;
         esac ;;
       5)
         warn "$(L "This destroys EVERY member's key. Every VeilX phone on this server becomes permanently unopenable. There is no undo." "这会销毁【所有成员】的密钥。本服务器上每一台 VeilX 手机都将永久打不开。无法撤销。")"
@@ -726,9 +742,12 @@ oprf_repair() {
   docker compose stop oprf >/dev/null 2>&1
   docker ps -aq --filter name=oprf 2>/dev/null | xargs -r docker rm -f >/dev/null 2>&1
   docker compose up -d oprf >/dev/null 2>&1
+  # CRITICAL: rm+recreate gives oprf a NEW container IP; Caddy caches the old one
+  # and keeps returning 502. Restart caddy so it re-resolves the upstream.
+  docker compose restart caddy >/dev/null 2>&1
   sleep 4
   if docker compose ps --status running -q oprf 2>/dev/null | grep -q .; then
-    ok "$(L "OPRF service is running again." "OPRF 服务已恢复运行。")"
+    ok "$(L "OPRF service is running again (Caddy re-pointed)." "OPRF 服务已恢复运行(Caddy 已重新指向)。")"
   else
     warn "$(L "Still down — check: docker compose logs --tail 20 oprf" "仍未恢复 —— 请查: docker compose logs --tail 20 oprf")"
   fi
@@ -773,21 +792,32 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
 
 [profile.release]
 strip = true
 EOF
   cat > oprf/src/main.rs <<'EOF'
 //! VeilX OPRF guard — server half of the server-assisted PIN.
-use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
+use axum::{extract::State, http::StatusCode, routing::{get, post}, Json, Router};
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use curve25519_dalek::{ristretto::CompressedRistretto, scalar::Scalar};
+use ed25519_dalek::{Signer, SigningKey};
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
 use std::{sync::Arc, time::{SystemTime, UNIX_EPOCH}};
 
 #[derive(Clone)]
-struct App { db: sled::Db, http: reqwest::Client, homeserver: String, rate_limit: u32, rate_window: u64 }
+struct App {
+    db: sled::Db,
+    http: reqwest::Client,
+    homeserver: String,
+    rate_limit: u32,
+    rate_window: u64,
+    // Ed25519 key the client pins at enrollment; every dead-hand status response is
+    // signed with it, so a man-in-the-middle cannot forge a "destroy" verdict.
+    signing_key: SigningKey,
+}
 #[derive(Serialize, Deserialize)]
 struct Record {
     k: [u8; 32],
@@ -859,6 +889,57 @@ async fn kill(State(app): State<Arc<App>>, headers: axum::http::HeaderMap, Json(
     StatusCode::NO_CONTENT
 }
 
+#[derive(Serialize)] struct PubkeyResp { pubkey: String }
+#[derive(Deserialize)] struct StatusReq { account: String }
+#[derive(Serialize)] struct StatusResp { state: String, ts: u64, sig: String }
+
+/// The client pins this at enrollment; public, so no auth. It is only a *verify*
+/// key — the private half never leaves the server.
+async fn pubkey(State(app): State<Arc<App>>) -> Json<PubkeyResp> {
+    Json(PubkeyResp { pubkey: B64.encode(app.signing_key.verifying_key().to_bytes()) })
+}
+
+/// Dead-hand status: the phone polls this. The verdict is SIGNED over
+/// "account:state:ts", so a hostile network cannot forge "killed" to destroy a
+/// member's data, nor forge "ok" that the client would trust over a real kill
+/// (the client only ACTS on killed/frozen, and only when the signature checks).
+///  - ok:     do nothing
+///  - frozen: encrypt-and-lock now (reversible)
+///  - killed: destroy now (permanent)
+async fn status(State(app): State<Arc<App>>, headers: axum::http::HeaderMap, Json(req): Json<StatusReq>)
+    -> Result<Json<StatusResp>, StatusCode> {
+    if !verify(&app, &headers, &req.account).await { return Err(StatusCode::UNAUTHORIZED) }
+    let rec: Option<Record> = app.db.get(req.account.as_bytes()).ok().flatten()
+        .and_then(|b| serde_json::from_slice(&b).ok());
+    let state = match rec {
+        Some(r) if r.killed => "killed",
+        Some(r) if r.frozen => "frozen",
+        _ => "ok",
+    };
+    let ts = now();
+    let msg = format!("{}:{}:{}", req.account, state, ts);
+    let sig = app.signing_key.sign(msg.as_bytes());
+    Ok(Json(StatusResp { state: state.to_string(), ts, sig: B64.encode(sig.to_bytes()) }))
+}
+
+/// Load the Ed25519 signing key from `path`, generating+persisting it on first run.
+/// Kept next to the sled db (0600, in the same LUKS-backed volume).
+fn load_or_make_key(path: &str) -> SigningKey {
+    if let Ok(bytes) = std::fs::read(path) {
+        if let Ok(arr) = <[u8; 32]>::try_from(bytes.as_slice()) {
+            return SigningKey::from_bytes(&arr);
+        }
+    }
+    let key = SigningKey::generate(&mut OsRng);
+    let _ = std::fs::write(path, key.to_bytes());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    key
+}
+
 /// Local admin operations (run by the installer, never exposed over HTTP).
 /// Deliberately has no way to print k: the key must never leave the database.
 fn admin(db: &sled::Db, args: &[String]) {
@@ -904,6 +985,30 @@ fn admin(db: &sled::Db, args: &[String]) {
             }
             eprintln!("killed {n}");
         }
+        // Dead-man reaper: destroy any account not seen for N days. Meant to run
+        // from cron, so a member who is detained (and can no longer check in) has
+        // their phone rendered unopenable automatically, without the operator
+        // having to be online to press the button.
+        "--admin-reap" => {
+            let days: u64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+            if days == 0 { eprintln!("usage: --admin-reap <days>"); return; }
+            let cutoff = now().saturating_sub(days * 86400);
+            let mut n = 0;
+            let victims: Vec<String> = db.iter().filter_map(|kv| kv.ok())
+                .filter_map(|(k, v)| {
+                    let r: Record = serde_json::from_slice(&v).ok()?;
+                    // Only reap enrolled, still-alive accounts with a real last_seen.
+                    if !r.killed && r.last_seen != 0 && r.last_seen < cutoff {
+                        Some(String::from_utf8_lossy(&k).to_string())
+                    } else { None }
+                }).collect();
+            for a in victims {
+                let r = Record { k: [0u8; 32], window_start: now(), count: 0, killed: true, frozen: false, last_seen: 0 };
+                save(&a, &r); n += 1;
+                eprintln!("reaped {a}");
+            }
+            eprintln!("reaped {n} account(s) idle > {days}d");
+        }
         _ => eprintln!("unknown admin command"),
     }
 }
@@ -931,16 +1036,20 @@ async fn main() {
         admin(&db, &args);
         return;
     }
+    let signing_key = load_or_make_key(&env("SIGNING_KEY", "/data/signing.key"));
     let app = Arc::new(App {
         db, http: reqwest::Client::new(),
         homeserver: env("HOMESERVER", "http://tuwunel:8008"),
-        rate_limit: env("RATE_LIMIT", "12").parse().unwrap_or(12),
+        rate_limit: env("RATE_LIMIT", "30").parse().unwrap_or(30),
         rate_window: env("RATE_WINDOW_SECS", "3600").parse().unwrap_or(3600),
+        signing_key,
     });
     let bind = env("BIND", "0.0.0.0:8787");
     let router = Router::new()
         .route("/oprf/eval", post(eval))
         .route("/oprf/kill", post(kill))
+        .route("/oprf/pubkey", get(pubkey))
+        .route("/oprf/status", post(status))
         .with_state(app);
     let listener = tokio::net::TcpListener::bind(&bind).await.expect("bind");
     eprintln!("veilx-oprf-guard listening on {bind}");
@@ -2622,7 +2731,7 @@ cat >> docker-compose.yml <<'EOF'
       HOMESERVER: "http://tuwunel:8008"   # 容器内直连,校验 token 归属(不出网)
       BIND: "0.0.0.0:8787"
       DB: "/data/oprf.db"
-      RATE_LIMIT: "12"
+      RATE_LIMIT: "30"
       RATE_WINDOW_SECS: "3600"
     volumes:
       - ./data/oprf:/data
