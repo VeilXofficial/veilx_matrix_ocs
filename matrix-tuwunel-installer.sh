@@ -353,7 +353,7 @@ menu_privacy() {
   ⚠️ tuwunel 没有"消息定时自动销毁"功能(未实现 MSC1763),别对外承诺服务器会自动销毁消息。')"
   echo ""
   echo "$(L "── Current hardening status (reads tuwunel.toml) ──" "── 当前加固状态(读 tuwunel.toml)──")"
-  _pk(){ if grep -qE "^$1[[:space:]]*=" tuwunel.toml 2>/dev/null; then echo "  ✔ $2"; else echo "  ✘ $2 $(L "(not enabled)" (未启用))"; fi; }
+  _pk(){ if grep -qE "^$1[[:space:]]*=" tuwunel.toml 2>/dev/null; then echo "  ✔ $2"; else echo "  ✘ $2 $(L "(not enabled)" "(未启用)")"; fi; }
   _pk ip_source                 "$(L "real client IP not stored (ip_source=connect_info)" "真实客户端 IP 不入库(ip_source=connect_info)")"
   _pk save_unredacted_events    "$(L "redaction is a true delete (no 60-day original kept)" "撤回即真删(不再保留 60 天原文)")"
   _pk allow_local_presence      "$(L "presence not recorded" 不记录在线状态)"
