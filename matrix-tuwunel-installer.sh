@@ -114,6 +114,8 @@
 #      sudo tuwunel admin-url       # 【改后台网址】admin. → 别的子域(如 console. ;需先加对应 DNS)
 #      sudo tuwunel lang            # 【切换界面语言】English / 简体中文(存 .env,持久生效)
 #      sudo tuwunel enable-elementx # 【开 Element X 手机自助注册】(原生OIDC;disable-elementx 关)
+#      sudo tuwunel cf-cert         # 【全橙云】粘贴 CF Origin 证书(橙云下 Caddy 签不出证书时用)
+#                                     #   cf-cert status 看到期  /  cf-cert off 关掉回自动 HTTPS
 #      sudo tuwunel privacy        # 隐私/元数据:看能删什么、查加固状态、清日志
 #      sudo tuwunel forget-secrets  # 抗取证:涂销磁盘上的明文密码/邀请码
 #      sudo tuwunel autobackup     # 可选:开启每周自动加密备份(含轮转/满盘跳过)
@@ -133,6 +135,10 @@
 #    ENABLE_ADMIN=1|0           Web 管理后台 Ketesa(默认 1=开;放 admin.域名,需加 DNS)
 #    ADMIN_SUB=admin            后台子域名(默认 admin;可设 console/manage 等,需加对应 DNS)
 #    CDN=1|0                    服务器前是否有 Cloudflare/CDN 代理(默认 0;放宽 DNS 预检)
+#    CF_ORIGIN=1|0              全橙云:用 CF Origin 证书替代自动 HTTPS(默认 0)
+#                               橙云下 Caddy 的 ACME 必失败(TLS-ALPN-01 被 CF 终止、
+#                               HTTP-01 在 Full(Strict) 下死锁),故须自带证书。
+#                               代价:上传上限 100MB、通话不可用、VeilX 代理不可用。
 #    MAX_UPLOAD=4G              单文件上限(默认 4G;支持 K/M/G,内部转字节)
 #
 #  ★ server_name(你的域名)一旦部署【不可更改】,改了必须清库重来 —— tuwunel 硬限制。
@@ -1969,6 +1975,188 @@ EOF
   exit 0
 fi
 
+
+# =====================================================================
+# CF Origin 证书(全橙云模式)
+# ---------------------------------------------------------------------
+# 橙云下 Caddy 自动 HTTPS 一定失败,两条验证方式全被 CF 挡住:
+#   · TLS-ALPN-01:CF 在边缘终止 TLS,acme-tls/1 这个 ALPN 传不到源站 —— 必失败
+#   · HTTP-01    :Full(Strict) 下是死锁 —— CF 回源要求源站already有有效证书,
+#                  而你正是因为没有证书才在申请
+# 解法:用 CF 后台签的 Origin Certificate(免费/15 年/只有 CF 认它),Caddy 用
+# tls 指令直接加载,全程不碰 ACME。
+# 关键设计:证书路径 + 开关(CF_ORIGIN)都存进 .env,Caddyfile 的生成逻辑读它 ——
+# 所以以后 tuwunel config / update / 重跑安装 重新生成 Caddyfile 时会自动带上
+# tls 指令,不会像"手动改 Caddyfile"那样被覆盖掉。
+# =====================================================================
+CF_DIR_NAME="cf-origin"
+
+# 读取用户粘贴的一段 PEM:忽略 BEGIN 之前的杂物,读到 END 行为止。
+# 容忍从网页/Windows 复制来的 CRLF(否则 openssl 会报莫名其妙的解析错)。
+cf_read_pem() {
+  local line out=""
+  while IFS= read -r line; do
+    line="${line%$'\r'}"
+    if [ -z "$out" ]; then
+      case "$line" in *-----BEGIN*) out="$line"$'\n';; *) continue;; esac
+    else
+      out="$out$line"$'\n'
+      case "$line" in *-----END*) break;; esac
+    fi
+  done
+  printf '%s' "$out"
+}
+
+# 取证书的 SAN,输出形如 DNS:example.com,DNS:*.example.com
+# 不用 `openssl x509 -ext`(那是 OpenSSL 3 专属,LibreSSL/旧版会报 unknown option
+# 并静默返回空 → SAN 检查会把好证书误判成坏的)。-text 的格式各实现一致。
+cf_san_of() {
+  openssl x509 -in "$1" -noout -text 2>/dev/null \
+    | awk '/Subject Alternative Name/{getline; gsub(/[ \t]/,""); print; exit}'
+}
+
+# 校验:能解析 / 没过期 / 证书与私钥配对 / SAN 同时覆盖根域名和 *.域名。
+# 任何一条不过就拒绝落盘 —— 宁可不装,也不能让 Caddy 抱着一张废证书起不来。
+cf_validate() {
+  local crt="$1" key="$2" dom="$3" pc pk san
+  openssl x509 -in "$crt" -noout >/dev/null 2>&1 || { warn "$(L "Certificate does not parse — did you paste the whole PEM block?" "证书解析失败 —— 整段 PEM 都粘上了吗?")"; return 1; }
+  openssl pkey -in "$key" -noout >/dev/null 2>&1 || { warn "$(L "Private key does not parse" "私钥解析失败")"; return 1; }
+  openssl x509 -in "$crt" -noout -checkend 0 >/dev/null 2>&1 || { warn "$(L "Certificate has already expired" "证书已经过期了")"; return 1; }
+  pc="$(openssl x509 -in "$crt" -noout -pubkey 2>/dev/null | openssl md5 2>/dev/null)"
+  pk="$(openssl pkey -in "$key" -pubout 2>/dev/null | openssl md5 2>/dev/null)"
+  [ -n "$pc" ] && [ "$pc" = "$pk" ] || { warn "$(L "Certificate and private key are not a pair" "证书和私钥不是一对(粘串了?)")"; return 1; }
+  san="$(cf_san_of "$crt")"
+  case "$san" in *"DNS:$dom"*) :;; *) warn "$(L "Certificate SAN does not cover $dom (needed for the root domain)" "证书 SAN 不含 $dom(根域名要用)")"; return 1;; esac
+  case "$san" in *"DNS:*.$dom"*) :;; *) warn "$(L "Certificate SAN does not cover *.$dom (needed for matrix./admin.)" "证书 SAN 不含 *.$dom(matrix. / admin. 等子域要用)")"; return 1;; esac
+  return 0
+}
+
+# 交互收集 + 校验 + 落盘。$1=域名 $2=目标目录。成功 0 / 失败 1(失败时不动任何现有文件)。
+cf_collect_and_store() {
+  local dom="$1" dir="$2" crt key tmpd
+  command -v openssl >/dev/null 2>&1 || { warn "$(L "openssl not found" "找不到 openssl")"; return 1; }
+  has_tty || { warn "$(L "Pasting a certificate needs an interactive terminal" "粘贴证书需要交互终端")"; return 1; }
+
+  printf '\n%s%s%s\n' "$C_B$C_CYAN" "$(L "CF Origin Certificate" "CF Origin 证书")" "$C_RESET"
+  cat <<EOF
+$(L "Get one from the Cloudflare dashboard (free, 15 years, only CF trusts it):" "去 Cloudflare 后台签一张(免费,15 年有效,只有 CF 认它):")
+  1. SSL/TLS → Origin Server → Create Certificate
+  2. $(L "Hostnames: keep the default" "主机名保持默认") ${C_GREEN}$dom, *.$dom${C_RESET}
+  3. $(L "Private key type: RSA or ECC, format PEM. You get TWO blocks." "私钥类型 RSA 或 ECC 均可,格式 PEM。会给你【两段】。")
+  4. ${C_YELLOW}$(L "The private key is shown ONCE — copy it before closing the page." "私钥只显示这一次,关掉页面就再也拿不到,先复制好。")${C_RESET}
+
+$(L "Also confirm in the dashboard:" "另外后台还要确认:")
+  · SSL/TLS → $(L "encryption mode" "加密模式") = ${C_GREEN}Full (Strict)${C_RESET}
+  · Security → Bot Fight Mode = ${C_GREEN}Off${C_RESET}  $(L "(it 403s Matrix clients)" "(否则会 403 掉 Matrix 客户端)")
+  · Rules → Cache Rules → /_matrix/* $(L and 和) /.well-known/matrix/* = ${C_GREEN}Bypass cache${C_RESET}
+EOF
+  press_enter "$(L "Ready? Press Enter, then paste the CERTIFICATE… " "准备好了按回车,然后粘贴【证书】… ")"
+
+  echo ""
+  echo "$(L "Paste the CERTIFICATE (from -----BEGIN CERTIFICATE----- to -----END CERTIFICATE-----):" "粘贴【证书】(从 -----BEGIN CERTIFICATE----- 到 -----END CERTIFICATE-----):")"
+  if [ -t 0 ]; then crt="$(cf_read_pem)"; else crt="$(cf_read_pem < /dev/tty)"; fi
+  echo ""
+  echo "$(L "Paste the PRIVATE KEY (from -----BEGIN ... PRIVATE KEY----- to -----END ... PRIVATE KEY-----):" "粘贴【私钥】(从 -----BEGIN ... PRIVATE KEY----- 到 -----END ... PRIVATE KEY-----):")"
+  if [ -t 0 ]; then key="$(cf_read_pem)"; else key="$(cf_read_pem < /dev/tty)"; fi
+
+  case "$crt" in *CERTIFICATE*) :;; *) warn "$(L "That was not a certificate" "粘进来的不是证书")"; return 1;; esac
+  case "$key" in *PRIVATE*KEY*) :;; *) warn "$(L "That was not a private key" "粘进来的不是私钥")"; return 1;; esac
+  case "$key" in *CERTIFICATE*) warn "$(L "You pasted the certificate twice — the second block must be the PRIVATE KEY" "两段都粘成证书了 —— 第二段要粘【私钥】")"; return 1;; esac
+
+  tmpd="$dir.tmp.$$"
+  ( umask 077; mkdir -p "$tmpd" ) || { warn "$(L "Cannot create $tmpd" "无法创建 $tmpd")"; return 1; }
+  printf '%s' "$crt" > "$tmpd/origin.pem"
+  printf '%s' "$key" > "$tmpd/origin.key"
+
+  if ! cf_validate "$tmpd/origin.pem" "$tmpd/origin.key" "$dom"; then
+    rm -rf "$tmpd"
+    warn "$(L "Certificate rejected — nothing on disk was changed." "证书未通过校验 —— 磁盘上什么都没改。")"
+    return 1
+  fi
+
+  ( umask 077; mkdir -p "$dir" ) || { rm -rf "$tmpd"; return 1; }
+  mv -f "$tmpd/origin.pem" "$dir/origin.pem" && mv -f "$tmpd/origin.key" "$dir/origin.key" || { rm -rf "$tmpd"; return 1; }
+  rm -rf "$tmpd"
+  chmod 700 "$dir" 2>/dev/null || true
+  chmod 644 "$dir/origin.pem" 2>/dev/null || true
+  chmod 600 "$dir/origin.key" 2>/dev/null || true
+  ok "$(L "Certificate validated and saved to $dir" "证书已通过校验,保存在 $dir")"
+  return 0
+}
+
+# 打印当前证书状态(SAN / 到期时间)。没装返回 1。
+cf_cert_status() {
+  local dir="${INSTALL_DIR:-/opt/tuwunel}/$CF_DIR_NAME" exp san
+  if [ ! -s "$dir/origin.pem" ] || [ ! -s "$dir/origin.key" ]; then
+    echo "  $(L "CF Origin cert: not installed" "CF Origin 证书: 未安装")"; return 1
+  fi
+  san="$(cf_san_of "$dir/origin.pem")"
+  exp="$(openssl x509 -in "$dir/origin.pem" -noout -enddate 2>/dev/null | cut -d= -f2)"
+  echo "  $(L "Covers" "覆盖"): ${san:-?}"
+  echo "  $(L "Expires" "到期"): ${exp:-?}"
+  if ! openssl x509 -in "$dir/origin.pem" -noout -checkend 2592000 >/dev/null 2>&1; then
+    warn "$(L "Less than 30 days left — re-issue it in the CF dashboard and run: sudo tuwunel cf-cert" "剩余不到 30 天 —— 去 CF 后台重签,然后执行: sudo tuwunel cf-cert")"
+  fi
+  return 0
+}
+
+# 装/换证书:收集 → 落盘 → 写 CF_ORIGIN=1 → 重新生成 Caddyfile 并重启
+cf_cert_paste() {
+  local dom
+  INSTALL_DIR="${INSTALL_DIR:-/opt/tuwunel}"; SELF_BIN="${SELF_BIN:-$INSTALL_DIR/tuwunel-installer.sh}"
+  dom="$(env_saved MATRIX_DOMAIN)"
+  [ -n "$dom" ] || { warn "$(L "No deployed config found — install the server first" "未找到已部署配置 —— 请先装服务器")"; return 1; }
+  cf_collect_and_store "$dom" "$INSTALL_DIR/$CF_DIR_NAME" || return 1
+  px_env_set CF_ORIGIN 1 || warn "$(L "Could not write .env" "写入 .env 失败")"
+  px_env_set USE_CDN   1 || true
+  echo ""
+  echo "$(L "Applying: regenerating Caddyfile and restarting…" "正在应用:重新生成 Caddyfile 并重启…")"
+  if [ -f "$SELF_BIN" ]; then
+    CF_ORIGIN=1 INSTALL_DIR="$INSTALL_DIR" bash "$SELF_BIN" config
+  else
+    warn "$(L "Script copy missing — run: sudo tuwunel config" "缺少脚本副本 —— 请手动执行: sudo tuwunel config")"
+  fi
+}
+
+# 关掉全橙云模式,回到 Caddy 自动 HTTPS(证书文件保留,想再开不用重签)
+cf_cert_off() {
+  INSTALL_DIR="${INSTALL_DIR:-/opt/tuwunel}"; SELF_BIN="${SELF_BIN:-$INSTALL_DIR/tuwunel-installer.sh}"
+  warn "$(L "Switch the records back to grey-cloud (DNS only) FIRST — otherwise Caddy still cannot get a certificate and the site stays down." "先把 DNS 记录改回灰云(仅 DNS)—— 否则 Caddy 照样签不出证书,站点会一直起不来。")"
+  ask_opt "$(L "Records already grey-cloud? Continue? [y/N]: " "记录已经改回灰云了?继续吗? [y/N]: ")" "n"
+  case "$REPLY" in y|Y) :;; *) echo "$(L Cancelled 已取消)"; return 0;; esac
+  px_env_set CF_ORIGIN 0 || true
+  if [ -f "$SELF_BIN" ]; then
+    CF_ORIGIN=0 INSTALL_DIR="$INSTALL_DIR" bash "$SELF_BIN" config
+  else
+    warn "$(L "Script copy missing — run: sudo tuwunel config" "缺少脚本副本 —— 请手动执行: sudo tuwunel config")"
+  fi
+}
+
+menu_cf_cert() {
+  INSTALL_DIR="${INSTALL_DIR:-/opt/tuwunel}"
+  local st
+  [ "$(env_saved CF_ORIGIN)" = "1" ] && st="$(L ON 已开启)" || st="$(L OFF 未开启)"
+  printf '\n%s%s%s  [%s]\n' "$C_B$C_CYAN" "$(L "CF Origin certificate — full orange-cloud mode" "CF Origin 证书 —— 全橙云模式")" "$C_RESET" "$st"
+  cf_cert_status || true
+  cat <<EOF
+
+$(L "Behind an orange cloud Caddy can never get its own certificate; this loads a" "橙云后面 Caddy 永远签不出自己的证书;开启后改为加载一张")
+$(L "CF-issued Origin Certificate instead (free, 15 years)." "CF 签发的 Origin 证书(免费,15 年)。")
+${C_YELLOW}$(L "Cost of full orange-cloud: 100MB upload cap, and voice/video calls will not work." "全橙云的代价:上传上限 100MB,且语音视频通话用不了。")${C_RESET}
+
+  1) $(L "Install / replace the certificate (paste it from the CF dashboard)" "安装 / 更换证书(从 CF 后台粘贴)")
+  2) $(L "Turn OFF — back to Caddy automatic HTTPS (grey-cloud / DNS only)" "关闭 —— 回到 Caddy 自动 HTTPS(灰云 / 仅 DNS)")
+  0) $(L Back 返回)
+EOF
+  ask_opt "$(L "Select [0-2]: " "请选择 [0-2]: ")" "0"
+  case "$REPLY" in
+    1) cf_cert_paste ;;
+    2) cf_cert_off ;;
+    *) : ;;
+  esac
+}
+
+
 RECONFIG=0
 if [ "${1:-}" = "config" ]; then RECONFIG=1; set --; fi
 # 子命令: enable-admin / disable-admin —— 给已部署的老服务器单独开/关 Web 管理后台
@@ -2007,6 +2195,18 @@ if [ "${1:-}" = "oprf-repair" ]; then
   INSTALL_DIR="${INSTALL_DIR:-/opt/tuwunel}"
   [ -d "$INSTALL_DIR" ] || die "$(L "$INSTALL_DIR not found" "找不到 $INSTALL_DIR")"
   oprf_repair; exit 0
+fi
+# 子命令: cf-cert —— CF Origin 证书(全橙云模式)。无参进小菜单。
+if [ "${1:-}" = "cf-cert" ]; then
+  INSTALL_DIR="${INSTALL_DIR:-/opt/tuwunel}"; SELF_BIN="${SELF_BIN:-$INSTALL_DIR/tuwunel-installer.sh}"
+  [ -d "$INSTALL_DIR" ] || die "$(L "$INSTALL_DIR not found — install the server first" "找不到 $INSTALL_DIR —— 请先装服务器")"
+  case "${2:-}" in
+    status)        cf_cert_status ;;
+    off|disable)   cf_cert_off ;;
+    ""|set|paste)  menu_cf_cert ;;
+    *) die "$(L "Usage: sudo tuwunel cf-cert [status|off]" "用法: sudo tuwunel cf-cert [status|off]")" ;;
+  esac
+  exit 0
 fi
 if [ "${1:-}" = "privacy" ]; then INSTALL_DIR="${INSTALL_DIR:-/opt/tuwunel}"; menu_privacy; exit 0; fi
 if [ "${1:-}" = "forget-secrets" ]; then INSTALL_DIR="${INSTALL_DIR:-/opt/tuwunel}"; menu_forget_secrets; exit 0; fi
@@ -2095,6 +2295,7 @@ if [ "$RECONFIG" -eq 0 ] && [ -f "$INSTALL_DIR/CREDENTIALS.txt" ] \
   a) $(L "Change admin panel URL (admin. → another subdomain)" "修改后台网址(admin. → 别的子域)")
   x) $(L "VeilX dedicated proxy (anti-censorship; link + QR for the app)" "VeilX 专用代理(抗封锁;给 App 出链接+二维码)")$([ "$(env_saved ENABLE_PROXY)" = "1" ] && L "  [ON]" "  [已开启]")
   o) $(L "VeilX hardening: server-assisted PIN (seized offline phones can't be cracked)" "VeilX 加固:服务器辅助 PIN(被抄走的离线手机无法破解)")$([ "$(env_saved ENABLE_OPRF)" = "1" ] && L "  [ON]" "  [已开启]")
+  c) $(L "CF Origin certificate (full orange-cloud: paste the cert Cloudflare generated)" "CF Origin 证书(全橙云:粘贴 Cloudflare 生成的证书)")$([ "$(env_saved CF_ORIGIN)" = "1" ] && L "  [ON]" "  [已开启]")
   L) $(L "Switch interface language → 中文" "切换界面语言 → English")   (语言 / Language)
   0) $(L Exit 退出)
 EOF
@@ -2123,6 +2324,7 @@ EOF
            [ -d "$INSTALL_DIR" ] || exit 0 ;;
         x|X) menu_proxy ;;
         o|O) menu_oprf ;;
+        c|C) menu_cf_cert ;;
         p|P) menu_privacy ;;
         s|S) menu_forget_secrets ;;
         b|B) menu_autobackup ;;
@@ -2187,7 +2389,7 @@ bold "$(L "Target: $DOMAIN  →  server ${PUBLIC_IP:-unknown}  →  dir $INSTALL
 # ---------------------------------------------------------------------
 # 选项(回车=推荐默认;重跑沿用;环境变量可预设)
 # ---------------------------------------------------------------------
-EXPLICIT=0; [ -n "${REG_MODE:-}${ENABLE_FEDERATION:-}${ENABLE_CALLS:-}${ENABLE_WEB:-}${ENABLE_ADMIN:-}${ENABLE_ELEMENTX:-}${ENABLE_PRIVACY:-}${PRIVACY:-}${MAX_UPLOAD:-}${_ADMIN_SUB_ENV:-}${ENABLE_OPRF:-}" ] && EXPLICIT=1
+EXPLICIT=0; [ -n "${REG_MODE:-}${ENABLE_FEDERATION:-}${ENABLE_CALLS:-}${ENABLE_WEB:-}${ENABLE_ADMIN:-}${ENABLE_ELEMENTX:-}${ENABLE_PRIVACY:-}${PRIVACY:-}${MAX_UPLOAD:-}${_ADMIN_SUB_ENV:-}${ENABLE_OPRF:-}${CF_ORIGIN:-}" ] && EXPLICIT=1
 REG_MODE="${REG_MODE:-$(env_saved REG_MODE)}"
 ENABLE_FEDERATION="${ENABLE_FEDERATION:-$(env_saved ENABLE_FEDERATION)}"
 ENABLE_CALLS="${ENABLE_CALLS:-$(env_saved ENABLE_CALLS)}"
@@ -2197,6 +2399,7 @@ ENABLE_ELEMENTX="${ENABLE_ELEMENTX:-$(env_saved ENABLE_ELEMENTX)}"   # Element X
 ENABLE_PRIVACY="${PRIVACY:-${ENABLE_PRIVACY:-$(env_saved ENABLE_PRIVACY)}}"   # 隐私加固/元数据最小化(默认开)
 ENABLE_OPRF="${ENABLE_OPRF:-$(env_saved ENABLE_OPRF)}"   # VeilX 加固:服务器辅助 PIN(OPRF),让被抄走的离线手机无法爆破 PIN
 USE_CDN="${CDN:-$(env_saved USE_CDN)}"   # 服务器前是否有 Cloudflare/CDN 代理(影响 DNS 预检与提示;不改生成的配置)
+CF_ORIGIN="${CF_ORIGIN:-$(env_saved CF_ORIGIN)}"   # 全橙云:用 CF Origin 证书顶替 ACME(会改 Caddyfile:每个站点加 tls 指令)
 MAX_UPLOAD="${MAX_UPLOAD:-}"
 SAVED_BYTES="$(env_saved MAX_UPLOAD_BYTES)"
 
@@ -2384,6 +2587,21 @@ $(L "   · ${C_GREEN}matrix.$DOMAIN and the media host MUST be grey-cloud (DNS-o
    · 想用橙云\"藏源站 IP\"基本无效(证书透明度/灰云子域会泄漏),别指望它做隐私")
 CDNEOF
   fi
+  # 全橙云:必须先问清楚。橙云下 Caddy 的 ACME 一定失败,不预先拿到 Origin 证书,
+  # 装到最后会卡在"证书签不出→整站 502",而那时候用户已经不知道该回头改哪里了。
+  if [ "$USE_CDN" = "1" ] && [ -z "$CF_ORIGIN" ]; then
+    printf '\n%s%s%s\n' "$C_B$C_CYAN" "$(L "Full orange-cloud (every record Proxied)?" "要全橙云吗(所有记录都开代理)?")" "$C_RESET"
+    printf '%s\n' "$(L "  [n] No (recommended) — matrix./livekit. stay grey-cloud, Caddy gets its own certs.
+  [y] Yes — behind the orange cloud Caddy CANNOT get a certificate (TLS-ALPN-01 is
+      terminated by CF; HTTP-01 deadlocks under Full (Strict)). You must paste a CF
+      Origin Certificate, and this installer will ask you for it in a moment.
+      Cost: 100MB upload cap, and voice/video calls will not work." "  [n] 不是(推荐)—— matrix. / livekit. 保持灰云,Caddy 自己签证书。
+  [y] 是 —— 橙云后面 Caddy【签不出证书】(TLS-ALPN-01 被 CF 终止;HTTP-01 在
+      Full(Strict) 下死锁)。必须粘一张 CF Origin 证书,稍后会让你粘。
+      代价:上传上限 100MB,且语音视频通话用不了。")"
+    ask_opt "$(L "→ [y/N, Enter=n]: " "→ [y/N,回车=n]: ")" "n"
+    case "$REPLY" in y|Y) CF_ORIGIN=1;; *) CF_ORIGIN=0;; esac
+  fi
   press_enter "$(L "Done with ① ②? Press Enter to start… (not done? Ctrl+C to quit) " "①② 做好了按回车开始…(没做?Ctrl+C 退出) ")"
 fi
 
@@ -2391,6 +2609,12 @@ fi
 # 1. DNS 预检
 # ---------------------------------------------------------------------
 case "$USE_CDN" in 1) :;; *) USE_CDN=0;; esac
+case "$CF_ORIGIN" in 1) :;; *) CF_ORIGIN=0;; esac
+# 全橙云 + 通话 = 一定不通(LiveKit 媒体走 UDP 7881/7882,CF 只代理 HTTP;而且
+# use_external_ip=true 会把源站 IP 直接塞进 ICE candidate 发给每个通话参与者)。
+if [ "$CF_ORIGIN" = "1" ] && [ "$ENABLE_CALLS" = "1" ]; then
+  warn "$(L "Full orange-cloud + calls: LiveKit media is UDP and cannot pass through Cloudflare — calls will not work, and the origin IP leaks into ICE candidates anyway." "全橙云 + 通话:LiveKit 媒体走 UDP,过不了 Cloudflare —— 通话一定不通,而且源站 IP 照样会从 ICE candidate 漏出去。")"
+fi
 dns_check(){ local bad=0 h R4
   for h in $REQUIRED_HOSTS; do
     R4="$(getent ahosts "$h" 2>/dev/null | awk '{print $1}' | grep -E '^[0-9]+\.' | grep -Ev '^127\.' | sort -u || true)"
@@ -2480,6 +2704,15 @@ fi
 
 bold "$(L "5/6 Generate keys & config" "5/6 生成密钥与配置")"
 umask 077
+# 全橙云:证书必须在生成 Caddyfile 之前就位。拿不到就【退回自动 HTTPS】——
+# 宁可退回,也不能让 Caddyfile 引用一个不存在的文件(那样 caddy 直接起不来 = 整站下线)。
+( umask 077; mkdir -p "$CF_DIR_NAME" ) 2>/dev/null || true
+if [ "$CF_ORIGIN" = "1" ] && { [ ! -s "$CF_DIR_NAME/origin.pem" ] || [ ! -s "$CF_DIR_NAME/origin.key" ]; }; then
+  if ! cf_collect_and_store "$DOMAIN" "$PWD/$CF_DIR_NAME"; then
+    warn "$(L "No usable CF Origin certificate — falling back to Caddy automatic HTTPS. If your records are orange-clouded the certificate will fail; set them to grey-cloud, or run: sudo tuwunel cf-cert" "没拿到可用的 CF Origin 证书 —— 退回 Caddy 自动 HTTPS。若记录是橙云,证书会签不出来;请改灰云,或稍后执行: sudo tuwunel cf-cert")"
+    CF_ORIGIN=0
+  fi
+fi
 [ -f .env ] && cp -a .env ".env.bak-$(date +%F-%H%M%S)" 2>/dev/null || true
 env_get(){ grep -E "^$1=" .env 2>/dev/null | head -1 | cut -d= -f2- || true; }
 REG_TOKEN="$(env_get REG_TOKEN)"; [ -n "$REG_TOKEN" ] || REG_TOKEN="$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | cut -c1-24)"
@@ -2515,6 +2748,7 @@ PROXY_FLOW=$PROXY_FLOW
 PROXY_FP=$PROXY_FP
 PROXY_HOST=$PROXY_HOST
 USE_CDN=$USE_CDN
+CF_ORIGIN=$CF_ORIGIN
 MAX_UPLOAD_BYTES=$MAX_UPLOAD_BYTES
 TUWUNEL_MEM=$TUWUNEL_MEM
 LIVEKIT_API_KEY=$LK_KEY
@@ -2751,6 +2985,7 @@ cat >> docker-compose.yml <<'EOF'
     ports: ["80:80", "443:443", "443:443/udp"]
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./cf-origin:/etc/caddy/cf:ro          # 全橙云用的 CF Origin 证书(没开时是空目录,无副作用)
       - ./data/caddy/data:/data
       - ./data/caddy/config:/config
     mem_limit: 128m
@@ -2801,6 +3036,13 @@ else
 fi
 
 # ---- Caddyfile ----
+# 全橙云:显式指定证书 → Caddy 对这些站点完全不启用 ACME(橙云下 ACME 必失败)。
+# CF_ORIGIN=0 时 $TLS_LINE 为空串,站点块里只多一个空行,行为和以前完全一致。
+if [ "$CF_ORIGIN" = "1" ]; then
+  TLS_LINE="	tls /etc/caddy/cf/origin.pem /etc/caddy/cf/origin.key"
+else
+  TLS_LINE=""
+fi
 # OPRF 挂在 matrix.域名/oprf/ 这个路径上:复用现有证书,不需要新域名/新 DNS。
 if [ "$ENABLE_OPRF" = "1" ]; then
   OPRF_ROUTE=$'\thandle /oprf/* {\n\t\treverse_proxy oprf:8787\n\t}'
@@ -2819,6 +3061,7 @@ cat > Caddyfile <<EOF
 
 # 委派:server_name=$DOMAIN,实际服务在 $M_HOST
 $DOMAIN {
+$TLS_LINE
 	handle /.well-known/matrix/server {
 		header Content-Type application/json
 		header Access-Control-Allow-Origin *
@@ -2842,6 +3085,7 @@ if [ "$ENABLE_ADMIN" = "1" ]; then
 cat >> Caddyfile <<EOF
 
 $M_HOST {
+$TLS_LINE
 	@reportstub path /_synapse/admin/v1/event_reports /_synapse/admin/v1/user_reports
 	@opts method OPTIONS
 	@ev path /_synapse/admin/v1/event_reports
@@ -2865,6 +3109,7 @@ $OPRF_ROUTE
 }
 
 $A_HOST {
+$TLS_LINE
 	reverse_proxy ketesa:8080
 }
 EOF
@@ -2872,6 +3117,7 @@ else
 cat >> Caddyfile <<EOF
 
 $M_HOST {
+$TLS_LINE
 $OPRF_ROUTE
 	handle {
 		reverse_proxy tuwunel:8008
@@ -2883,9 +3129,11 @@ if [ "$ENABLE_CALLS" = "1" ]; then
 cat >> Caddyfile <<EOF
 
 $LK_HOST {
+$TLS_LINE
 	reverse_proxy livekit:7880
 }
 $RTC_HOST {
+$TLS_LINE
 	reverse_proxy lk-jwt-service:8080
 }
 EOF
@@ -2920,7 +3168,9 @@ docker compose config -q || die "$(L "compose config validation failed" "compose
 # 不通过则本次【不重启 caddy】(老配置继续跑,不中断),并提示用户。
 CADDY_OK=1
 if command -v docker >/dev/null 2>&1 && docker image inspect caddy:2 >/dev/null 2>&1; then
-  if docker run --rm -v "$PWD/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2 \
+  # cf-origin 也要挂进来:caddy validate 会走完整 provision,tls 指令引用的证书文件
+  # 不存在就会校验失败 —— 不挂的话开了 CF_ORIGIN 会被误判成"语法错"而跳过重启。
+  if docker run --rm -v "$PWD/Caddyfile:/etc/caddy/Caddyfile:ro" -v "$PWD/cf-origin:/etc/caddy/cf:ro" caddy:2 \
        caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1; then
     ok "$(L "Caddyfile validated" "Caddyfile 校验通过")"
   else
@@ -3058,6 +3308,7 @@ $CALL_NOTE
 
  $(L "Self-check:" "自检:")
    curl -s https://$DOMAIN/.well-known/matrix/client
+$([ "$CF_ORIGIN" = "1" ] && printf '   %s\n   %s' "$(L "CF Origin certificate mode is ON — Caddy does not use ACME. Check it with: sudo tuwunel cf-cert status" "已启用 CF Origin 证书模式 —— Caddy 不走 ACME。查看: sudo tuwunel cf-cert status")" "$(L "CF dashboard must be: SSL/TLS = Full (Strict), Bot Fight Mode off, /_matrix/* cache bypassed." "CF 后台务必:SSL/TLS = Full (Strict)、Bot Fight Mode 关、/_matrix/* 设 Bypass cache。")")
    cd $INSTALL_DIR && docker compose ps    # $(L "all containers should be running" "容器都应 running")
 
  ${C_YELLOW}$(L "⚠️ Cloud security group must allow: $PORT_LINE" "⚠️ 云安全组放行: $PORT_LINE")${C_RESET}
