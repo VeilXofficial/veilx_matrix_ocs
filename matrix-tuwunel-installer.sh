@@ -1,12 +1,50 @@
 #!/usr/bin/env bash
 # =====================================================================
-#  Matrix 轻量一键安装脚本 · tuwunel 版(通用版 t1.19)
-#  Matrix one-command installer · tuwunel edition (Universal t1.19)
-#  t1.19:【死手开关】服务器可远程让成员手机①冻结=加密上锁(可撤销)②销毁=永久不可解。
+#  Matrix 轻量一键安装脚本 · tuwunel 版(通用版 t1.23)
+#  Matrix one-command installer · tuwunel edition (Universal t1.23)
+#  t1.23:【VeilX 自研管理后台】管理后台新增选择:VeilX 自研(默认)/ Ketesa。自研后台是
+#         纯静态 SPA(内嵌进本脚本,Caddy file_server 托管,不另起容器),只调 tuwunel 真正
+#         支持的接口——用户/邀请码/房间(含发布到公开目录)都能用,不像 Ketesa 有一堆坏页。
+#         并接入 VeilX 专属能力:【设备安全】远程冻结/销毁(走 OPRF 服务新增的 /oprf/admin/*
+#         管理员路由,服务端校验管理员身份,对任意账号操作、无需停容器)。ADMIN_UI=veilx|ketesa。
+#  t1.22:【默认孤岛·不再逐项问】隔离与加固写死,安装向导从 8 问精简到 3 问。
+#         固定(不再询问):注册=令牌、联邦=关、只面向VeilX、不装Element Web、
+#         隐私加固=开、OPRF=开。VeilX 本就是"自建、只服务本团队"的孤岛,这些是产品
+#         定义而非可选项,选错任何一个都会破坏保密模型。仅保留 3 个纯功能问题:
+#         【通话 / 管理后台 / 文件上限】。极个别破例仍可用环境变量显式覆盖(如
+#         ENABLE_FEDERATION=1),但绝不弹交互;重跑配置一律回到孤岛默认。
+#  t1.21:【团队通讯录】两件事一起放开,让团队【用户+房间】都可被发现:
+#         ① show_all_local_users_in_user_directory=true —— 任何成员都能搜到本服全部用户
+#            (默认只显示"同过房/公开房里"的人,新同事谁都搜不到)。
+#         ② lockdown_public_room_directory=false —— 普通成员建的公开房也能进目录被搜到
+#            (原隐私加固块把它锁成"仅管理员可发布",于是成员建的公开房永远搜不到;
+#            且该块还把 ① 又设回 false,把团队通讯录整个抵消掉 —— 现已从隐私块移除,
+#            两个开关统一在 [global] 按团队模型设置)。私密房间不受影响,外服由客户端域名过滤挡住。
+#         老服务器:`sudo tuwunel` 菜单重跑配置(或手动改 tuwunel.toml 后重启容器)即可生效;
+#         已经建出来的公开房是"未发布"状态,需重新发布一次(重建,或在客户端里把它设为公开)。
+#  t1.20:【只面向 VeilX 客户端】新增【选项 8/8】(默认开,VEILX_ONLY=1|0|strict)。开启后
+#         ①不部署 Element Web ②关掉 Element X 自助注册(原生 OIDC) ③Caddy 拒绝
+#         User-Agent 不含 VeilX 的 /_matrix/client/* 与 /_synapse/admin/*。
+#         动机:阅后即焚等策略是【由客户端执行】的,队里有一个人用 Element,
+#         他的旧消息就永远不会被清掉,房间策略对他形同虚设。
+#         ⚠️ 这是【门槛】不是【保证】:UA 是客户端自述字符串,伪造成本约等于零,
+#         已登录的会话也不受影响。真要强制只能上应用完整性证明,而那与本项目
+#         "能在去 Google 化手机上跑"冲突。别对外宣称成安全边界。
+#         刻意保留的放行:/_matrix/client/versions(规范公开,且安装器就绪检查、
+#         菜单在线检查、客户端加速验证都在打它)、/_matrix/federation/* 与
+#         /_matrix/key/*(否则开联邦会整个断掉)。
+#         管理后台**不在 matrix 主机上开任何例外**:Ketesa 改成同源走 admin 主机,
+#         在那里单独放行它真正调用的十来个端点(login/whoami/profile/publicRooms/
+#         directory/media/_synapse/admin/*)——这份清单里没有 /sync、没有
+#         /rooms/*/messages、没有 /send,所以把 Element 指过去也同步不了、发不出。
+#         (早先草案在 matrix 主机放行 `Origin: https://admin.<域名>`,那是个人人可用的
+#          口子:Origin 同样是自述头,admin 子域又是公开 DNS,加个请求头即可全绕。)
+#  t1.19:【远程停用】服务器可远程让员工手机①冻结=加密上锁(可撤销)②销毁=永久不可解。
 #         指令用服务器的 Ed25519 私钥签名(/data/signing.key 首次启动自动生成,0600),
-#         客户端在启用最高档时固定公钥,**中间人无法伪造销毁指令去毁掉任意成员数据**。
+#         客户端在启用最高档时固定公钥,**中间人无法伪造销毁指令去毁掉任意员工数据**。
 #         新增: GET /oprf/pubkey(公开)、POST /oprf/status(签名裁决 ok/frozen/killed)、
-#         `--admin-reap <天>` 失联自动收割(配 cron,人被抓无法上线时自动销毁)。
+#         `--admin-reap <天>` 长期未签到自动【冻结】(配 cron;可撤销,≥7 天才受理)。
+#         要不可逆销毁得显式用 `--admin-reap-destroy <天>`。
 #         限速 12→30 次/小时(客户端后台立即零化后解锁更频繁,12 会误伤正常使用)。
 #         修复: 应急处置里的"吊销登录会话"原用 `tuwunel --execute`,但服务器运行时
 #         RocksDB 被占锁必然失败;tuwunel 只能在【管理员房间】发 !admin 命令,
@@ -16,10 +54,10 @@
 #         ①run 一律加 -T + trap 兜底 + 管理后强制验证服务复活;②容器打不开锁时不再 panic
 #         死循环,而是等锁释放最多 30s;③新增 `sudo tuwunel oprf-repair`(菜单第 3 项)
 #         一键强杀卡死容器+干净重启(绝不碰数据库文件);④管理前先清理残留的 -run- 容器。
-#  t1.17:【VeilX 加固:服务器辅助 PIN(OPRF)】新增可选组件,安装时【选项 7/7】默认开,
+#  t1.17:【VeilX 加固:服务器辅助 PIN(OPRF)】新增可选组件,安装时【选项 7/8】默认开,
 #         装好后菜单 o) 项或 `sudo tuwunel oprf` 管理(状态/开关/销毁某成员密钥/日志),
 #         也可 `sudo tuwunel enable-oprf|disable-oprf`。作用:VeilX 手机解锁必须问这台服务器,
-#         于是【被抄走且离线的手机永远无法爆破 PIN】,成员被抓时可远程销毁其密钥让手机永久打不开。
+#         于是【失窃且离线的手机永远无法爆破 PIN】,设备丢失或员工离职时可远程销毁其密钥让手机永久打不开。
 #         实现:docker 服务(oprf/,多阶段编译 Rust,不在宿主机装工具链),Caddy 把
 #         matrix.域名/oprf/ 反代到它——复用现有证书,不需新域名/DNS。它看不到任何人的 PIN。
 #         容错:OPRF 是唯一需本地编译的服务,故在主 up -d 前单独 build,失败自动退回未开启
@@ -46,7 +84,7 @@
 #  t1.11: 新增【可选·自动定时加密备份】(默认关):`sudo tuwunel autobackup` 开启后,cron
 #         每周(或每天)自动做 AES-256 加密备份、自动轮转(留最近 N 个)、满盘自动跳过;
 #         密钥存 .backup-key(仅 root),开启时醒目提示务必抄走(否则备份永久打不开)。
-#  t1.10:【抗取证/机密最小化】(1) 修复关键缺口:强制新房间默认 E2EE
+#  t1.10:【保密加固/机密最小化】(1) 修复关键缺口:强制新房间默认 E2EE
 #        (encryption_enabled_by_default_for_room_type="all";此前不写=客户端没主动加密时消息明文入库);
 #        (2) 备份改【AES-256 加密】(可选口令;此前裸 tar.gz 含明文密码是最糟暴露面);
 #        (3) 新增 `sudo tuwunel forget-secrets`(菜单 s):涂销磁盘上的明文管理员密码/邀请码 + fstrim。
@@ -117,7 +155,7 @@
 #      sudo tuwunel cf-cert         # 【全橙云】粘贴 CF Origin 证书(橙云下 Caddy 签不出证书时用)
 #                                     #   cf-cert status 看到期  /  cf-cert off 关掉回自动 HTTPS
 #      sudo tuwunel privacy        # 隐私/元数据:看能删什么、查加固状态、清日志
-#      sudo tuwunel forget-secrets  # 抗取证:涂销磁盘上的明文密码/邀请码
+#      sudo tuwunel forget-secrets  # 无痕清理:涂销磁盘上的明文密码/邀请码
 #      sudo tuwunel autobackup     # 可选:开启每周自动加密备份(含轮转/满盘跳过)
 #      sudo tuwunel config          # 改配置    sudo tuwunel uninstall  # 卸载
 #   (curl|bash 管道模式想让菜单/adduser 可用,设 TUWUNEL_INSTALLER_URL=<上面URL> 让它自取副本)
@@ -133,13 +171,22 @@
 #    ENABLE_FEDERATION=1|0      联邦(默认 0=关闭,纯私密孤岛)
 #    ENABLE_CALLS=1|0           语音视频通话(默认 0=关闭)
 #    ENABLE_ADMIN=1|0           Web 管理后台 Ketesa(默认 1=开;放 admin.域名,需加 DNS)
-#    ADMIN_SUB=admin            后台子域名(默认 admin;可设 console/manage 等,需加对应 DNS)
+#    ADMIN_SUB=veilx            后台子域名(默认:VeilX 自研=veilx、Ketesa=admin;可设 console 等,需加对应 DNS)
+#    ADMIN_UI=veilx|ketesa      用哪个管理后台(默认 veilx=自研;ketesa=通用 synapse-admin)
 #    CDN=1|0                    服务器前是否有 Cloudflare/CDN 代理(默认 0;放宽 DNS 预检)
 #    CF_ORIGIN=1|0              全橙云:用 CF Origin 证书替代自动 HTTPS(默认 0)
 #                               橙云下 Caddy 的 ACME 必失败(TLS-ALPN-01 被 CF 终止、
 #                               HTTP-01 在 Full(Strict) 下死锁),故须自带证书。
 #                               代价:上传上限 100MB、通话不可用、VeilX 代理不可用。
 #    MAX_UPLOAD=4G              单文件上限(默认 4G;支持 K/M/G,内部转字节)
+#    VEILX_ONLY=1|0|strict      只面向 VeilX 客户端(默认 1)。开启时:
+#                               ① 不部署 Element Web ② 关掉 Element X 自助注册(原生 OIDC)
+#                               ③ Caddy 只放行 User-Agent 含 VeilX 的 /_matrix/client/*
+#                                  与 /_synapse/admin/*(/versions 永远放行)
+#                               strict = 连管理后台的例外也不留,并自动关掉 Ketesa
+#                               ⚠️ 这是【门槛】不是【保证】:UA 是客户端自述字符串,
+#                                  改个 UA 即可绕过。真要强制只能上应用完整性证明
+#                                  (Play Integrity/App Attest),而那与本项目的去 Google 化冲突。
 #
 #  ★ server_name(你的域名)一旦部署【不可更改】,改了必须清库重来 —— tuwunel 硬限制。
 #  脚本可安全重复运行:已完成的部署只做重启;半途失败会自动续装。
@@ -253,11 +300,15 @@ json_esc() {
   s="${s//$'\r'/\\r}"
   printf '%s' "$s"
 }
+# 安装器自己的 User-Agent。**必须含 "VeilX"**:开了 VEILX_ONLY 之后,Caddy 只放行
+# UA 含 VeilX 的 /_matrix/client/*,而建号走的正是 /_matrix/client/v3/register ——
+# 不带这个,新装时【自动创建管理员】和 `sudo tuwunel adduser` 都会被自己的拦截 403。
+INSTALLER_UA="VeilX-Installer/1.0"
 register_user() {
   local u="$1" p="$2" hs="$3" tok="$4" r sess eu ep et es
   eu="$(json_esc "$u")"; ep="$(json_esc "$p")"; et="$(json_esc "$tok")"
   # UIAA 第一步:拿 session
-  r="$(curl -4 -sS --max-time 15 -X POST "$hs/_matrix/client/v3/register" \
+  r="$(curl -4 -sS --max-time 15 -A "$INSTALLER_UA" -X POST "$hs/_matrix/client/v3/register" \
         -H 'Content-Type: application/json' \
         -d "{\"username\":\"$eu\",\"password\":\"$ep\",\"inhibit_login\":true}" 2>/dev/null || true)"
   case "$r" in *'"user_id"'*) return 0 ;; esac   # 万一无需 UIAA 直接成功
@@ -265,13 +316,13 @@ register_user() {
   [ -n "$sess" ] || return 1
   es="$(json_esc "$sess")"
   # 第二步:带注册令牌
-  r="$(curl -4 -sS --max-time 15 -X POST "$hs/_matrix/client/v3/register" \
+  r="$(curl -4 -sS --max-time 15 -A "$INSTALLER_UA" -X POST "$hs/_matrix/client/v3/register" \
         -H 'Content-Type: application/json' \
         -d "{\"username\":\"$eu\",\"password\":\"$ep\",\"inhibit_login\":true,\"auth\":{\"type\":\"m.login.registration_token\",\"token\":\"$et\",\"session\":\"$es\"}}" 2>/dev/null || true)"
   case "$r" in
     *'"user_id"'*) return 0 ;;
     *'m.login.dummy'*)   # 部分实现在令牌后还要 dummy 阶段
-      r="$(curl -4 -sS --max-time 15 -X POST "$hs/_matrix/client/v3/register" \
+      r="$(curl -4 -sS --max-time 15 -A "$INSTALLER_UA" -X POST "$hs/_matrix/client/v3/register" \
             -H 'Content-Type: application/json' \
             -d "{\"username\":\"$eu\",\"password\":\"$ep\",\"inhibit_login\":true,\"auth\":{\"type\":\"m.login.dummy\",\"session\":\"$es\"}}" 2>/dev/null || true)"
       case "$r" in *'"user_id"'*) return 0 ;; *) return 1 ;; esac ;;
@@ -315,6 +366,13 @@ menu_status() {
   cd "$INSTALL_DIR"
   local d asub; d="$(env_saved MATRIX_DOMAIN)"; asub="$(env_saved ADMIN_SUB)"; asub="${asub:-admin}"
   echo ""; echo "$(L "── Current config ──" "── 当前配置 ──")"
+  local vonly vonly_txt; vonly="$(env_saved VEILX_ONLY)"
+  case "$vonly" in
+    0|"")   vonly_txt="$(L "off (any Matrix client)" "关(任何 Matrix 客户端)")" ;;
+    strict) vonly_txt="$(L "STRICT (no admin-panel exception)" "严格(不留后台例外)")" ;;
+    *)      vonly_txt="$(L "on (non-VeilX clients refused)" "开(拒绝非 VeilX 客户端)")" ;;
+  esac
+  echo "  $(L "VeilX-only" 仅VeilX): $vonly_txt"
   echo "  $(L Hardening 加固): $([ "$(env_saved ENABLE_OPRF)" = "1" ] && L "server-assisted PIN ON" "服务器辅助PIN 已开" || L "off" 未开)"
   echo "  $(L Domain 域名): ${d:-$(L unknown 未知)}   $(L Reg 注册): $(env_saved REG_MODE)   $(L Federation 联邦): $([ "$(env_saved ENABLE_FEDERATION)" = "1" ] && L on 开 || L off 关)   $(L Calls 通话): $([ "$(env_saved ENABLE_CALLS)" = "1" ] && L on 开 || L off 关)   $(L Web 网页): $([ "$(env_saved ENABLE_WEB)" = "1" ] && L on 开 || L off 关)   $(L Admin 后台): $([ "$(env_saved ENABLE_ADMIN)" = "1" ] && L on 开 || L off 关)   $(L Big-files 大文件): $(human "$(env_saved MAX_UPLOAD_BYTES)")"
   [ "$(env_saved ENABLE_WEB)" = "1" ] && echo "  $(L "Web client:" "网页客户端:") https://${d}$(L "(members register/log in in a browser)" "(成员浏览器直接注册/登录)")"
@@ -396,7 +454,7 @@ menu_forget_secrets() {
   if [ ! -f CREDENTIALS.txt ]; then ok "$(L "CREDENTIALS.txt does not exist (maybe already wiped)." "CREDENTIALS.txt 不存在(可能已涂销)。")"; else
     if grep -qE 'WIPED|安全销毁' CREDENTIALS.txt 2>/dev/null; then ok "$(L "Credentials file already wiped — no plaintext password/token." "凭据文件已涂销过,无明文密码/令牌。")"; else
       echo "$(L "CREDENTIALS.txt holds the PLAINTEXT admin password + invite token. They are useless at runtime (the password is hashed in the DB, shown here only for you)," "CREDENTIALS.txt 里有【明文管理员密码 + 邀请码】,运行时无用(密码已哈希入库,仅显示用),")"
-      echo "$(L "but they are the highest-value target for forensics after a disk image. This wipes those two lines; the file stays (as a deployment marker)." "却是磁盘镜像后被取证\"一击拿走\"的最高价值目标。此操作会把这两行涂掉,文件保留(作部署标记)。")"
+      echo "$(L "but they are the highest-value target for anyone who gets physical access to the disk after a disk image. This wipes those two lines; the file stays (as a deployment marker)." "却是拿到磁盘镜像的人\"一击拿走\"的最高价值目标。此操作会把这两行涂掉,文件保留(作部署标记)。")"
       echo "$(L "Copy the admin password / invite token into your password manager FIRST!" "务必先把管理员密码/邀请码抄进密码管理器!")"
       printf "%s" "$(L "Confirm wipe? type yes: " "确认涂销? 输入 yes: ")"; local R=""; if [ -t 0 ]; then read -r R || R=""; else read -r R < /dev/tty 2>/dev/null || R=""; fi
       if [ "$R" = "yes" ]; then
@@ -420,25 +478,25 @@ menu_forget_secrets() {
   echo "$(L "  Note: deletion on SSD/VPS is not a guaranteed physical wipe; the only reliable destruction is LUKS crypto-erase or destroying the disk." "  注:SSD/VPS 上删除不保证物理擦除;彻底销毁只能靠 LUKS 加密擦除或销毁磁盘。")"
 }
 
-# 成员应急处置:被拘捕/失联时对某个成员的密钥做处置。
-# 分层的关键:【冻结】可撤销,是拘捕头几小时该做的事(还不知道人会不会被放);
-# 【销毁】不可撤销,确认危险后再用。只有这两级分开,管理员才敢在第一时间动手。
+# 设备应急处置:设备丢失/失窃/员工离职时对该账号的密钥做处置。
+# 分层的关键:【冻结】可撤销,是刚发现异常那几小时该做的事(还不知道设备能不能找回);
+# 【销毁】不可撤销,确认拿不回来了再用。只有这两级分开,管理员才敢在第一时间动手。
 menu_oprf_members() {
   cd "$INSTALL_DIR" 2>/dev/null || return
   local D; D="$(env_saved MATRIX_DOMAIN)"
-  # 处置时可顺带吊销该账号的 Matrix 登录会话:否则对方若在【已解锁+联网】状态下
-  # 拿到手机,仍能用他的账号继续收发消息、看群里在说什么。
+  # 处置时可顺带吊销该账号的 Matrix 登录会话:否则拿到手机的人若赶上【已解锁+联网】
+  # 状态,仍能用这个账号继续收发消息、看群里在说什么。
   # tuwunel is administered from its ADMIN ROOM, not the CLI: `tuwunel --execute`
   # cannot run while the server holds the RocksDB lock, so the old attempt here
   # always failed. Deactivating is the operator's most urgent action (it removes
-  # the member from every room, which rotates the Megolm keys so the seized
+  # the member from every room, which rotates the Megolm keys so the compromised
   # account stops receiving new messages), so spell out the exact command rather
   # than pretend to have done it.
   _revoke_sessions() {
     local acct="$1"
     printf '\n%s\n' "$(L "  ACTION REQUIRED — in the admin room of your VeilX/Element client, send:" "  需要你手动执行 —— 在客户端的【管理员房间】里发送:")"
     printf '      %s\n' "!admin users deactivate $acct"
-    printf '%s\n' "$(L "  This removes them from every room and rotates the encryption keys, so the seized account can no longer read new messages or impersonate them." "  这会把该账号踢出所有房间并轮换加密密钥,被查获的账号从此读不到新消息、也无法冒充该成员发言。")"
+    printf '%s\n' "$(L "  This removes them from every room and rotates the encryption keys, so the compromised account can no longer read new messages or impersonate them." "  这会把该账号踢出所有房间并轮换加密密钥,失控的账号从此读不到新消息、也无法冒充该员工发言。")"
     return 0
   }
   # sled 是单进程独占的:任何管理操作都必须先停服务容器,否则打不开数据库。
@@ -466,19 +524,20 @@ menu_oprf_members() {
     return $rc
   }
   while :; do
-    printf '\n%s\n' "$(L "── Member emergency response ──" "── 成员应急处置 ──")"
+    printf '\n%s\n' "$(L "── Device incident response ──" "── 设备应急处置 ──")"
     printf '%s\n' "$(L '
-  Detained / out of contact? FREEZE first — it blocks that phone from unlocking but
-  keeps the key, so you can undo it if they come back safely. Only DESTROY once you
-  are sure: that is permanent, and even the correct PIN will never open it again.' '
-  成员被拘捕/失联?先【冻结】—— 挡住那台手机解锁,但保住密钥,人平安回来可撤销。
-  确认危险后再【销毁】——不可逆,之后连正确的 PIN 也永远打不开。')"
+  Device lost, stolen, or an employee leaving? FREEZE first — it blocks that phone
+  from unlocking but keeps the key, so you can undo it if the device turns up. Only
+  DESTROY once you are sure: that is permanent, and even the correct PIN will never
+  open it again.' '
+  设备丢失/失窃,或员工离职?先【冻结】—— 挡住那台手机解锁,但保住密钥,设备找回可撤销。
+  确认拿不回来了再【销毁】——不可逆,之后连正确的 PIN 也永远打不开。')"
     echo ""
-    echo "  1) $(L "Member status (who is enrolled; keys are never shown)" "查看成员状态(谁启用了;不显示任何密钥)")"
-    echo "  2) $(L "FREEZE a member (reversible — use this first)" "【冻结】某成员(可撤销 —— 第一时间用这个)")"
-    echo "  3) $(L "Release a member (undo freeze)" "【解冻】某成员(撤销冻结)")"
-    echo "  4) $(L "DESTROY a member's key (permanent)" "【销毁】某成员的密钥(永久,不可逆)")"
-    echo "  5) $(L "DESTROY THE WHOLE TEAM (base compromised)" "【全队销毁】(据点暴露时)")"
+    echo "  1) $(L "Device status (who is enrolled; keys are never shown)" "查看设备状态(谁启用了;不显示任何密钥)")"
+    echo "  2) $(L "FREEZE an account (reversible — use this first)" "【冻结】某账号(可撤销 —— 第一时间用这个)")"
+    echo "  3) $(L "Release an account (undo freeze)" "【解冻】某账号(撤销冻结)")"
+    echo "  4) $(L "DESTROY an account's key (permanent)" "【销毁】某账号的密钥(永久,不可逆)")"
+    echo "  5) $(L "DESTROY EVERY ENROLLED DEVICE (org-wide incident)" "【全员销毁】(全组织级安全事件)")"
     echo "  0) $(L Back 返回)"
     local R=""; if [ -t 0 ]; then read -rp "$(L "Select: " "请选择: ")" R || return; else read -rp "$(L "Select: " "请选择: ")" R < /dev/tty 2>/dev/null || return; fi
     local acct="" c=""
@@ -497,7 +556,7 @@ menu_oprf_members() {
           printf '  %-34s %-12s %-10s %s\n' "$a" "$st" "${c2:-0}" "$when"
         done
         echo ""
-        echo "$(L "  (empty = nobody has enabled the highest level yet)" "  (空 = 还没有成员启用最高级别)")" ;;
+        echo "$(L "  (empty = nobody has enabled the highest level yet)" "  (空 = 还没有员工启用最高级别)")" ;;
       2|3|4)
         read -rp "$(L "Full user id (e.g. @li:$D): " "完整用户 id(如 @li:$D): ")" acct || continue
         [ -n "$acct" ] || continue
@@ -539,7 +598,7 @@ $(L "Press Enter to continue… " "按回车继续… ")"
   done
 }
 
-# VeilX 加固(服务器辅助 PIN):状态 / 开关 / 远程销毁某成员的密钥。
+# VeilX 加固(服务器辅助 PIN):状态 / 开关 / 远程销毁某账号的密钥。
 menu_oprf() {
   cd "$INSTALL_DIR" 2>/dev/null || { warn "$(L "Deployment directory not found" "未找到部署目录")"; return; }
   local D; D="$(env_saved MATRIX_DOMAIN)"
@@ -549,17 +608,17 @@ menu_oprf() {
     running=$(docker compose ps --status running -q oprf 2>/dev/null | grep -c . || echo 0)
     printf '\n%s\n' "$(L "── VeilX hardening: server-assisted PIN ──" "── VeilX 加固:服务器辅助 PIN ──")"
     printf '%s\n' "$(L '
-  What it does: VeilX phones must ask THIS server to unlock. So a seized phone that
-  is OFFLINE can never be brute-forced, and you can destroy a detained member’s key
-  so their phone becomes permanently unopenable. It never sees anyone’s PIN.' '
-  作用:VeilX 手机解锁时必须问【这台服务器】。于是被抄走且【离线】的手机永远无法爆破
-  PIN;成员被抓时你可销毁其密钥,让那台手机永久打不开。它全程看不到任何人的 PIN。')"
+  What it does: VeilX phones must ask THIS server to unlock. So a lost or stolen
+  phone that is OFFLINE can never be brute-forced, and you can destroy the key of a
+  device you cannot get back, making it permanently unopenable. It never sees any PIN.' '
+  作用:VeilX 手机解锁时必须问【这台服务器】。于是失窃且【离线】的手机永远无法爆破
+  PIN;设备拿不回来时你可销毁其密钥,让那台手机永久打不开。它全程看不到任何人的 PIN。')"
     echo ""
     echo "  $(L Status 状态): $([ "$on" = 1 ] && L "ON" "已开启" || L "OFF" "未开启")   $(L Container 容器): $([ "$running" -gt 0 ] && L running 运行中 || L "not running" 未运行)"
     [ "$on" = 1 ] && echo "  $(L "Client endpoint (the app finds this automatically)" "客户端端点(App 会自动找到)"): https://matrix.$D/oprf/"
     echo ""
     if [ "$on" = 1 ]; then
-      echo "  1) $(L "MEMBER EMERGENCY RESPONSE (detained: freeze / release / destroy)" "【成员应急处置】(成员被拘捕:冻结 / 解冻 / 销毁)")"
+      echo "  1) $(L "DEVICE INCIDENT RESPONSE (lost / stolen / offboarding: freeze / release / destroy)" "【设备应急处置】(丢失 / 失窃 / 离职:冻结 / 解冻 / 销毁)")"
       echo "  2) $(L "Logs" 查看日志)"
       echo "  3) $(L "RESTART / REPAIR service (if phones can't unlock / 502)" "重启 / 修复服务(手机解不了锁 / 502 时)")"
       echo "  4) $(L "Turn OFF (phones fall back to PIN + hardware only)" "关闭(手机退回仅 PIN + 硬件加密)")"
@@ -787,24 +846,69 @@ EOF
 name = "veilx-oprf-guard"
 version = "0.1.0"
 edition = "2021"
+description = "Server half of VeilX's server-assisted PIN (ristretto255 OPRF), with per-account rate limiting, reversible freeze, and signed remote-deactivation verdicts."
 
 [dependencies]
 axum = "0.7"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
-curve25519-dalek = { version = "4.1", features = ["rand_core"] }
+curve25519-dalek = { version = "4", features = ["rand_core"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 sled = "0.34"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
+# Token verification against the homeserver (whoami). rustls to avoid OpenSSL.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# Signs the remote-deactivation verdicts the client verifies against a pinned key.
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 
 [profile.release]
 strip = true
+lto = true
 EOF
   cat > oprf/src/main.rs <<'EOF'
 //! VeilX OPRF guard — server half of the server-assisted PIN.
+//!
+//! Holds a per-account ristretto255 secret `k` and evaluates `E = k · B` on the
+//! client's blinded point `B`. It never sees the PIN (only the blinded point) and
+//! never returns `k`. Because unlocking needs this evaluation, a lost OFFLINE
+//! device cannot brute-force the PIN — and this server can refuse (remote
+//! deactivation), plus it rate-limits so even online guessing is hopeless.
+//!
+//! HTTP (JSON):
+//!   POST /oprf/eval    { "account", "blinded" }  Authorization: Bearer <matrix token>
+//!         -> { "evaluated" }        429 rate-limited/frozen · 410 destroyed
+//!   POST /oprf/kill    { "account" }             Authorization: Bearer <matrix token>
+//!         -> 204. NOTE: authenticated **as the account owner** — this is the
+//!         "I lost my phone, kill it from my other device" path. An operator
+//!         acting on someone else's account uses the local `--admin-*` commands
+//!         below, which is why they exist.
+//!   GET  /oprf/pubkey  -> { "pubkey" }  public; the client pins it at enrollment
+//!   POST /oprf/status  { "account" }             Authorization: Bearer <matrix token>
+//!         -> { "state": ok|frozen|killed, "ts", "sig" }, Ed25519-signed over
+//!         "account:state:ts" so a hostile network can't forge a verdict.
+//!
+//! Operator surface (server-admin only; drives the VeilX admin console). The
+//! bearer token is checked against the homeserver's admin API, so only an
+//! operator — not the account owner — can act on someone else's account. These
+//! run against the RUNNING process (no container stop, unlike the CLI below):
+//!   GET  /oprf/admin/list                        -> [{account,state,count,last_seen}]
+//!   POST /oprf/admin/freeze   { "account" }      -> 204  (reversible hold)
+//!   POST /oprf/admin/unfreeze { "account" }      -> 204
+//!   POST /oprf/admin/kill     { "account" }      -> 204  (PERMANENT destroy)
+//!
+//! Local admin (run by the installer, never exposed over HTTP — deliberately has
+//! no way to print `k`):
+//!   --admin-list · --admin-freeze <acct> · --admin-unfreeze <acct>
+//!   --admin-kill <acct> · --admin-kill-all
+//!   --admin-reap <days>          冻结长期未签到的账号（可撤销，默认行为）
+//!   --admin-reap-destroy <days>  同上但永久销毁（不可逆，需显式选择）
+//!
+//! Config via env: BIND, DB, HOMESERVER, RATE_LIMIT, RATE_WINDOW_SECS,
+//! SIGNING_KEY (defaults to `signing.key` next to the database).
+//!
+//! ⚠️ 这个文件是**单一事实来源**。两个安装器内嵌的副本由
+//!    `veilx_matrix_ocs/scripts/sync-oprf.py` 从这里生成 —— 改完请跑一次 --write。
 use axum::{extract::State, http::StatusCode, routing::{get, post}, Json, Router};
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use curve25519_dalek::{ristretto::CompressedRistretto, scalar::Scalar};
@@ -820,8 +924,8 @@ struct App {
     homeserver: String,
     rate_limit: u32,
     rate_window: u64,
-    // Ed25519 key the client pins at enrollment; every dead-hand status response is
-    // signed with it, so a man-in-the-middle cannot forge a "destroy" verdict.
+    // Ed25519 key the client pins at enrollment; every deactivation status response
+    // is signed with it, so a man-in-the-middle cannot forge a "destroy" verdict.
     signing_key: SigningKey,
 }
 #[derive(Serialize, Deserialize)]
@@ -830,8 +934,8 @@ struct Record {
     window_start: u64,
     count: u32,
     killed: bool,
-    /// Reversible hold: refuses unlocks but keeps k, so a detention that ends
-    /// well can be undone. `killed` destroys k and can never be undone.
+    /// Reversible hold: refuses unlocks but keeps k, so an incident that turns out
+    /// fine can be undone. `killed` destroys k and can never be undone.
     #[serde(default)]
     frozen: bool,
     /// Unix time of the last successful evaluation (for the admin status list).
@@ -869,7 +973,7 @@ async fn eval(State(app): State<Arc<App>>, headers: axum::http::HeaderMap, Json(
     };
     if rec.killed { return Err(StatusCode::GONE) }
     // Frozen: same refusal as rate-limited, so a phone in the wrong hands just
-    // looks "try again later" rather than announcing that we froze the account.
+    // looks "try again later" rather than announcing that the account was frozen.
     if rec.frozen { return Err(StatusCode::TOO_MANY_REQUESTS) }
     let t = now();
     if t.saturating_sub(rec.window_start) >= app.rate_window { rec.window_start = t; rec.count = 0 }
@@ -886,7 +990,7 @@ async fn eval(State(app): State<Arc<App>>, headers: axum::http::HeaderMap, Json(
     Ok(Json(EvalResp { evaluated: B64.encode(evaluated) }))
 }
 
-/// Destroy this account's k — its phones become permanently unopenable.
+/// Destroy this account's k — its devices become permanently unopenable.
 async fn kill(State(app): State<Arc<App>>, headers: axum::http::HeaderMap, Json(req): Json<KillReq>) -> StatusCode {
     if !verify(&app, &headers, &req.account).await { return StatusCode::UNAUTHORIZED }
     let rec = Record { k: [0u8; 32], window_start: now(), count: 0, killed: true, frozen: false, last_seen: 0 };
@@ -905,9 +1009,9 @@ async fn pubkey(State(app): State<Arc<App>>) -> Json<PubkeyResp> {
     Json(PubkeyResp { pubkey: B64.encode(app.signing_key.verifying_key().to_bytes()) })
 }
 
-/// Dead-hand status: the phone polls this. The verdict is SIGNED over
-/// "account:state:ts", so a hostile network cannot forge "killed" to destroy a
-/// member's data, nor forge "ok" that the client would trust over a real kill
+/// Deactivation status: the phone polls this. The verdict is SIGNED over
+/// "account:state:ts", so a hostile network cannot forge "killed" to destroy an
+/// employee's data, nor forge "ok" that the client would trust over a real kill
 /// (the client only ACTS on killed/frozen, and only when the signature checks).
 ///  - ok:     do nothing
 ///  - frozen: encrypt-and-lock now (reversible)
@@ -926,6 +1030,76 @@ async fn status(State(app): State<Arc<App>>, headers: axum::http::HeaderMap, Jso
     let msg = format!("{}:{}:{}", req.account, state, ts);
     let sig = app.signing_key.sign(msg.as_bytes());
     Ok(Json(StatusResp { state: state.to_string(), ts, sig: B64.encode(sig.to_bytes()) }))
+}
+
+// ---- Operator (server-admin) HTTP surface ----
+// Mirrors the `--admin-*` CLI, but authenticated as a **server admin** and run
+// against the live process, so the VeilX admin console can freeze/kill/list any
+// account with no downtime (the CLI needs the container stopped — sled is
+// single-writer). Reachable at `/oprf/admin/*`.
+#[derive(Deserialize)] struct AdminReq { account: String }
+#[derive(Serialize)]   struct AdminAccount { account: String, state: String, count: u32, last_seen: u64 }
+
+/// The bearer token must belong to a **server admin** — verified by calling an
+/// admin-only homeserver endpoint with it (200 = admin, 403 = not). This reuses
+/// tuwunel's own admin gate instead of keeping a second list of who's an operator.
+async fn verify_admin(app: &App, headers: &axum::http::HeaderMap) -> bool {
+    let Some(tok) = headers.get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok()).and_then(|s| s.strip_prefix("Bearer ")) else { return false };
+    let url = format!("{}/_synapse/admin/v2/users?from=0&limit=1&guests=false",
+                      app.homeserver.trim_end_matches('/'));
+    match app.http.get(&url).bearer_auth(tok).send().await {
+        Ok(resp) => resp.status().is_success(),
+        Err(_) => false,
+    }
+}
+
+/// account + state + eval count + last_seen — never any key material.
+async fn admin_list(State(app): State<Arc<App>>, headers: axum::http::HeaderMap)
+    -> Result<Json<Vec<AdminAccount>>, StatusCode> {
+    if !verify_admin(&app, &headers).await { return Err(StatusCode::UNAUTHORIZED) }
+    let mut out = Vec::new();
+    for kv in app.db.iter() {
+        let Ok((k, v)) = kv else { continue };
+        let Ok(r) = serde_json::from_slice::<Record>(&v) else { continue };
+        let state = if r.killed { "destroyed" } else if r.frozen { "frozen" } else { "ok" };
+        out.push(AdminAccount {
+            account: String::from_utf8_lossy(&k).to_string(),
+            state: state.to_string(), count: r.count, last_seen: r.last_seen,
+        });
+    }
+    Ok(Json(out))
+}
+
+/// Reversible hold on someone else's account (keeps k). CONFLICT if already destroyed.
+async fn admin_freeze(State(app): State<Arc<App>>, headers: axum::http::HeaderMap, Json(req): Json<AdminReq>) -> StatusCode {
+    set_frozen(&app, &headers, &req.account, true).await
+}
+async fn admin_unfreeze(State(app): State<Arc<App>>, headers: axum::http::HeaderMap, Json(req): Json<AdminReq>) -> StatusCode {
+    set_frozen(&app, &headers, &req.account, false).await
+}
+async fn set_frozen(app: &Arc<App>, headers: &axum::http::HeaderMap, account: &str, freeze: bool) -> StatusCode {
+    if !verify_admin(app, headers).await { return StatusCode::UNAUTHORIZED }
+    match app.db.get(account.as_bytes()).ok().flatten()
+        .and_then(|b| serde_json::from_slice::<Record>(&b).ok()) {
+        Some(mut r) if !r.killed => {
+            r.frozen = freeze;
+            let _ = app.db.insert(account.as_bytes(), serde_json::to_vec(&r).unwrap());
+            let _ = app.db.flush_async().await;
+            StatusCode::NO_CONTENT
+        }
+        Some(_) => StatusCode::CONFLICT,   // already destroyed — nothing to (un)freeze
+        None => StatusCode::NOT_FOUND,
+    }
+}
+
+/// Destroy someone else's k — permanent, irreversible. Operator-only.
+async fn admin_kill(State(app): State<Arc<App>>, headers: axum::http::HeaderMap, Json(req): Json<AdminReq>) -> StatusCode {
+    if !verify_admin(&app, &headers).await { return StatusCode::UNAUTHORIZED }
+    let r = Record { k: [0u8; 32], window_start: now(), count: 0, killed: true, frozen: false, last_seen: 0 };
+    let _ = app.db.insert(req.account.as_bytes(), serde_json::to_vec(&r).unwrap());
+    let _ = app.db.flush_async().await;
+    StatusCode::NO_CONTENT
 }
 
 /// Load the Ed25519 signing key from `path`, generating+persisting it on first run.
@@ -980,7 +1154,7 @@ fn admin(db: &sled::Db, args: &[String]) {
             save(&args[2], &r);
             eprintln!("killed {}", args[2]);
         }
-        // Whole-team destruction, for a compromised base of operations.
+        // Org-wide destruction, for a company-level security incident.
         "--admin-kill-all" => {
             let mut n = 0;
             let accts: Vec<String> = db.iter().filter_map(|kv| kv.ok())
@@ -991,29 +1165,56 @@ fn admin(db: &sled::Db, args: &[String]) {
             }
             eprintln!("killed {n}");
         }
-        // Dead-man reaper: destroy any account not seen for N days. Meant to run
-        // from cron, so a member who is detained (and can no longer check in) has
-        // their phone rendered unopenable automatically, without the operator
-        // having to be online to press the button.
-        "--admin-reap" => {
+        // Idle reaper: act on accounts not seen for N days. Meant to run from cron,
+        // so a device that has been out of contact far longer than any normal absence
+        // is handled automatically, without an operator having to be online.
+        //
+        // ⚠️ **FREEZES by default, does not destroy.** An unattended cron job that
+        // permanently destroys data is the wrong default: parental leave, a long
+        // holiday, a hospital stay or a spare phone in a drawer all look exactly like
+        // a lost device from here. Freezing is reversible (`--admin-unfreeze`), costs
+        // the person one call to IT, and still blocks the device from unlocking —
+        // which is the whole point. `--admin-reap-destroy` keeps the irreversible
+        // behaviour for whoever deliberately wants it.
+        //
+        // The <7d floor exists for the same reason: a week is shorter than any normal
+        // absence, and anything below that is almost certainly a misconfigured cron.
+        "--admin-reap" | "--admin-reap-destroy" => {
+            let destroy = args[1] == "--admin-reap-destroy";
             let days: u64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
-            if days == 0 { eprintln!("usage: --admin-reap <days>"); return; }
+            if days == 0 {
+                eprintln!("usage: --admin-reap <days>            (freeze, reversible)");
+                eprintln!("       --admin-reap-destroy <days>    (destroy, PERMANENT)");
+                return;
+            }
+            if days < 7 {
+                eprintln!("refusing: <7 days is shorter than a normal absence \
+                           (holiday / leave / spare device) — pick a longer window");
+                return;
+            }
             let cutoff = now().saturating_sub(days * 86400);
             let mut n = 0;
-            let victims: Vec<String> = db.iter().filter_map(|kv| kv.ok())
+            let victims: Vec<(String, Record)> = db.iter().filter_map(|kv| kv.ok())
                 .filter_map(|(k, v)| {
                     let r: Record = serde_json::from_slice(&v).ok()?;
-                    // Only reap enrolled, still-alive accounts with a real last_seen.
-                    if !r.killed && r.last_seen != 0 && r.last_seen < cutoff {
-                        Some(String::from_utf8_lossy(&k).to_string())
+                    // Only act on enrolled, still-alive accounts with a real last_seen.
+                    // Already-frozen ones are skipped so a daily cron stays quiet.
+                    if !r.killed && !r.frozen && r.last_seen != 0 && r.last_seen < cutoff {
+                        Some((String::from_utf8_lossy(&k).to_string(), r))
                     } else { None }
                 }).collect();
-            for a in victims {
-                let r = Record { k: [0u8; 32], window_start: now(), count: 0, killed: true, frozen: false, last_seen: 0 };
+            for (a, mut r) in victims {
+                if destroy {
+                    r = Record { k: [0u8; 32], window_start: now(), count: 0,
+                                 killed: true, frozen: false, last_seen: 0 };
+                } else {
+                    r.frozen = true;   // keep k — this must stay undoable
+                }
                 save(&a, &r); n += 1;
-                eprintln!("reaped {a}");
+                eprintln!("{} {a}", if destroy { "destroyed" } else { "froze" });
             }
-            eprintln!("reaped {n} account(s) idle > {days}d");
+            eprintln!("{} {n} account(s) idle > {days}d",
+                      if destroy { "destroyed" } else { "froze" });
         }
         _ => eprintln!("unknown admin command"),
     }
@@ -1023,7 +1224,7 @@ fn admin(db: &sled::Db, args: &[String]) {
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
     let env = |k: &str, d: &str| std::env::var(k).unwrap_or_else(|_| d.to_string());
-    let db_path = env("DB", "/data/oprf.db");
+    let db_path = env("DB", "./oprf.db");
     // Don't panic-loop if an admin one-off container is briefly holding the lock:
     // wait for it to release (up to ~30s) instead of crashing and restarting.
     // A crash-loop here locks out EVERY highest-tier phone, so recover gracefully.
@@ -1042,20 +1243,30 @@ async fn main() {
         admin(&db, &args);
         return;
     }
-    let signing_key = load_or_make_key(&env("SIGNING_KEY", "/data/signing.key"));
+    // 默认与数据库同目录：docker 下是 /data/signing.key，独立部署是 <DIR>/data/signing.key。
+    // 两种部署因此都不必单独配这一项（仍可用 SIGNING_KEY 覆盖）。
+    let default_signing = std::path::Path::new(&db_path)
+        .parent()
+        .map(|p| p.join("signing.key"))
+        .unwrap_or_else(|| std::path::PathBuf::from("signing.key"));
+    let signing_key = load_or_make_key(&env("SIGNING_KEY", &default_signing.to_string_lossy()));
     let app = Arc::new(App {
         db, http: reqwest::Client::new(),
-        homeserver: env("HOMESERVER", "http://tuwunel:8008"),
+        homeserver: env("HOMESERVER", "https://localhost"),
         rate_limit: env("RATE_LIMIT", "30").parse().unwrap_or(30),
         rate_window: env("RATE_WINDOW_SECS", "3600").parse().unwrap_or(3600),
         signing_key,
     });
-    let bind = env("BIND", "0.0.0.0:8787");
+    let bind = env("BIND", "127.0.0.1:8787");
     let router = Router::new()
         .route("/oprf/eval", post(eval))
         .route("/oprf/kill", post(kill))
         .route("/oprf/pubkey", get(pubkey))
         .route("/oprf/status", post(status))
+        .route("/oprf/admin/list", get(admin_list))
+        .route("/oprf/admin/freeze", post(admin_freeze))
+        .route("/oprf/admin/unfreeze", post(admin_unfreeze))
+        .route("/oprf/admin/kill", post(admin_kill))
         .with_state(app);
     let listener = tokio::net::TcpListener::bind(&bind).await.expect("bind");
     eprintln!("veilx-oprf-guard listening on {bind}");
@@ -1817,7 +2028,7 @@ menu_proxy() {
 ┌────────────────────────────────────────────────────────┐
 │  $(L "VeilX dedicated proxy" "VeilX 专用代理")   [$(L "not set up" "尚未部署")]
 └────────────────────────────────────────────────────────┘
-  $(L "Lets your phone connect even from a censored network," "让你的手机在被封锁的网络里也能连上这台服务器,")
+  $(L "Lets your phone connect even on a restricted or unstable network," "让你的手机在受限或不稳定的网络下也能连上这台服务器,")
   $(L "by disguising the connection as your own website." "方法是把连接伪装成你自己的网站。")
 
   1) $(L "Set it up now (guided, one question)" "一键部署(向导,只问一个问题)")
@@ -2290,11 +2501,11 @@ if [ "$RECONFIG" -eq 0 ] && [ -f "$INSTALL_DIR/CREDENTIALS.txt" ] \
   9) $(L "Update script + apply new features (pull latest from GitHub, data untouched)" "更新脚本 + 应用新功能(从 GitHub 拉最新,数据不动)")
  10) $(L "Uninstall completely" "彻底卸载")
   p) $(L "Privacy hardening / metadata cleanup (what can be deleted, clear logs)" "隐私加固 / 元数据清理(看能删什么、清日志)")
-  s) $(L "Wipe plaintext credentials file (anti-forensics: remove on-disk password/token)" "涂销明文凭据文件(抗取证:去掉磁盘上的明文密码/邀请码)")
+  s) $(L "Wipe plaintext credentials file (traceless cleanup: remove on-disk password/token)" "涂销明文凭据文件(无痕清理:去掉磁盘上的明文密码/邀请码)")
   b) $(L "Scheduled encrypted backup (optional: weekly auto, with rotation/skip-if-full)" "自动定时加密备份(可选:开启后每周自动,含轮转/满盘跳过)")
   a) $(L "Change admin panel URL (admin. → another subdomain)" "修改后台网址(admin. → 别的子域)")
-  x) $(L "VeilX dedicated proxy (anti-censorship; link + QR for the app)" "VeilX 专用代理(抗封锁;给 App 出链接+二维码)")$([ "$(env_saved ENABLE_PROXY)" = "1" ] && L "  [ON]" "  [已开启]")
-  o) $(L "VeilX hardening: server-assisted PIN (seized offline phones can't be cracked)" "VeilX 加固:服务器辅助 PIN(被抄走的离线手机无法破解)")$([ "$(env_saved ENABLE_OPRF)" = "1" ] && L "  [ON]" "  [已开启]")
+  x) $(L "VeilX dedicated proxy (restricted-network connectivity; link + QR for the app)" "VeilX 专用代理(受限网络连接;给 App 出链接+二维码)")$([ "$(env_saved ENABLE_PROXY)" = "1" ] && L "  [ON]" "  [已开启]")
+  o) $(L "VeilX hardening: server-assisted PIN (lost offline phones can't be cracked)" "VeilX 加固:服务器辅助 PIN(丢失的离线手机无法破解)")$([ "$(env_saved ENABLE_OPRF)" = "1" ] && L "  [ON]" "  [已开启]")
   c) $(L "CF Origin certificate (full orange-cloud: paste the cert Cloudflare generated)" "CF Origin 证书(全橙云:粘贴 Cloudflare 生成的证书)")$([ "$(env_saved CF_ORIGIN)" = "1" ] && L "  [ON]" "  [已开启]")
   L) $(L "Switch interface language → 中文" "切换界面语言 → English")   (语言 / Language)
   0) $(L Exit 退出)
@@ -2374,7 +2585,12 @@ ACME_EMAIL="${ACME_EMAIL:-admin@$DOMAIN}"
 M_HOST="matrix.$DOMAIN"; LK_HOST="livekit.$DOMAIN"; RTC_HOST="matrix-rtc.$DOMAIN"
 # 管理后台子域名(默认 admin;可改成 console/manage 等)。ADMIN_SUB= 预设或安装时选择,存 .env。
 _ADMIN_SUB_ENV="${ADMIN_SUB:-}"                                  # 记录是否由环境变量显式传入(用于 EXPLICIT 判定)
-ADMIN_SUB="${ADMIN_SUB:-$(env_saved ADMIN_SUB)}"; ADMIN_SUB="${ADMIN_SUB:-admin}"
+ADMIN_SUB="${ADMIN_SUB:-$(env_saved ADMIN_SUB)}"                 # 环境变量 > 旧配置;都没有则留空,下面按后台类型定默认
+ADMIN_SUB_SET="$ADMIN_SUB"                                       # 非空 = 已显式指定过子域名(交互里不再强改)
+if [ -z "$ADMIN_SUB" ]; then
+  # 默认子域名随后台类型:VeilX 自研后台 → veilx.域名;Ketesa → admin.域名。
+  case "${ADMIN_UI:-$(env_saved ADMIN_UI)}" in ketesa) ADMIN_SUB="admin";; *) ADMIN_SUB="veilx";; esac
+fi
 ADMIN_SUB="$(echo "$ADMIN_SUB" | tr 'A-Z' 'a-z' | tr -d '[:space:]')"
 # 只允许一个合法 DNS 标签(小写字母数字+连字符,不含点);非法或与其它服务冲突则回落 admin
 echo "$ADMIN_SUB" | grep -Eq '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$' || ADMIN_SUB="admin"
@@ -2389,57 +2605,52 @@ bold "$(L "Target: $DOMAIN  →  server ${PUBLIC_IP:-unknown}  →  dir $INSTALL
 # ---------------------------------------------------------------------
 # 选项(回车=推荐默认;重跑沿用;环境变量可预设)
 # ---------------------------------------------------------------------
-EXPLICIT=0; [ -n "${REG_MODE:-}${ENABLE_FEDERATION:-}${ENABLE_CALLS:-}${ENABLE_WEB:-}${ENABLE_ADMIN:-}${ENABLE_ELEMENTX:-}${ENABLE_PRIVACY:-}${PRIVACY:-}${MAX_UPLOAD:-}${_ADMIN_SUB_ENV:-}${ENABLE_OPRF:-}${CF_ORIGIN:-}" ] && EXPLICIT=1
-REG_MODE="${REG_MODE:-$(env_saved REG_MODE)}"
-ENABLE_FEDERATION="${ENABLE_FEDERATION:-$(env_saved ENABLE_FEDERATION)}"
+EXPLICIT=0; [ -n "${REG_MODE:-}${ENABLE_FEDERATION:-}${ENABLE_CALLS:-}${ENABLE_WEB:-}${ENABLE_ADMIN:-}${ENABLE_ELEMENTX:-}${ENABLE_PRIVACY:-}${PRIVACY:-}${MAX_UPLOAD:-}${_ADMIN_SUB_ENV:-}${ENABLE_OPRF:-}${CF_ORIGIN:-}${VEILX_ONLY:-}" ] && EXPLICIT=1
+# ============ VeilX 孤岛姿态:锁死,不再逐项询问 ============
+# VeilX = 自建、只服务本团队的孤岛。以下六项是产品定义的一部分,不作为安装选项:
+#   REG_MODE=token       仅持邀请码者可注册
+#   ENABLE_FEDERATION=0  关联邦,外人无法向成员发消息(攻击面最小)
+#   ENABLE_WEB=0         不装 Element Web 第三方网页客户端
+#   ENABLE_ELEMENTX=0    关 Element X 自助注册(原生 OIDC)
+#   ENABLE_PRIVACY=1     隐私加固/元数据最小化(IP 不入库、关在线状态/正在输入、撤回即焚、关遥测)
+#   ENABLE_OPRF=1        服务器辅助 PIN(失窃离线手机无法爆破 PIN)
+#   VEILX_ONLY=1         只面向 VeilX 客户端(拒绝 Element 等)
+# 向导只再问【功能项】:通话 / 管理后台 / 文件上限。
+# 极个别确需破例的,仍可用环境变量显式覆盖(如 ENABLE_FEDERATION=1),但绝不弹交互问题;
+# 且刻意【不】读取旧配置里这几项 —— 重跑配置一律回到孤岛默认。
+REG_MODE="${REG_MODE:-token}"
+ENABLE_FEDERATION="${ENABLE_FEDERATION:-0}"
+ENABLE_WEB="${ENABLE_WEB:-0}"
+ENABLE_ELEMENTX="${ENABLE_ELEMENTX:-0}"
+ENABLE_PRIVACY="${PRIVACY:-${ENABLE_PRIVACY:-1}}"
+ENABLE_OPRF="${ENABLE_OPRF:-1}"
+VEILX_ONLY="${VEILX_ONLY:-1}"
+# —— 以下为仍可按团队需要选择的功能项 ——
 ENABLE_CALLS="${ENABLE_CALLS:-$(env_saved ENABLE_CALLS)}"
-ENABLE_WEB="${ENABLE_WEB:-$(env_saved ENABLE_WEB)}"   # 自托管 Element Web 网页客户端(你的域名注册/登录)
-ENABLE_ADMIN="${ENABLE_ADMIN:-$(env_saved ENABLE_ADMIN)}"   # 自托管 Ketesa Web 管理后台(admin.你的域名)
-ENABLE_ELEMENTX="${ENABLE_ELEMENTX:-$(env_saved ENABLE_ELEMENTX)}"   # Element X 手机App自助注册(tuwunel原生OIDC;默认开)
-ENABLE_PRIVACY="${PRIVACY:-${ENABLE_PRIVACY:-$(env_saved ENABLE_PRIVACY)}}"   # 隐私加固/元数据最小化(默认开)
-ENABLE_OPRF="${ENABLE_OPRF:-$(env_saved ENABLE_OPRF)}"   # VeilX 加固:服务器辅助 PIN(OPRF),让被抄走的离线手机无法爆破 PIN
+ENABLE_ADMIN="${ENABLE_ADMIN:-$(env_saved ENABLE_ADMIN)}"   # 自托管 Web 管理后台(admin.你的域名)
+ADMIN_UI="${ADMIN_UI:-$(env_saved ADMIN_UI)}"   # 后台用哪个:veilx(自研,默认)/ ketesa(通用 synapse-admin)
 USE_CDN="${CDN:-$(env_saved USE_CDN)}"   # 服务器前是否有 Cloudflare/CDN 代理(影响 DNS 预检与提示;不改生成的配置)
 CF_ORIGIN="${CF_ORIGIN:-$(env_saved CF_ORIGIN)}"   # 全橙云:用 CF Origin 证书顶替 ACME(会改 Caddyfile:每个站点加 tls 指令)
 MAX_UPLOAD="${MAX_UPLOAD:-}"
 SAVED_BYTES="$(env_saved MAX_UPLOAD_BYTES)"
 
-DEF_REG=1; DEF_FED=N; DEF_CALL=n; DEF_WEB=Y; DEF_ADMIN=Y; DEF_OPRF=Y
+DEF_REG=1; DEF_FED=N; DEF_CALL=n; DEF_WEB=Y; DEF_ADMIN=Y; DEF_OPRF=Y; DEF_VONLY=Y
 if [ "$RECONFIG" -eq 1 ] && [ "$EXPLICIT" -eq 0 ]; then
   has_tty || die "$(L "config needs an interactive terminal; or use env vars: ENABLE_CALLS=1 sudo -E bash tuwunel-installer.sh config" "config 需交互终端;或用环境变量: ENABLE_CALLS=1 sudo -E bash tuwunel-installer.sh config")"
-  case "$REG_MODE" in open) DEF_REG=2;; *) DEF_REG=1;; esac
-  [ "$ENABLE_FEDERATION" = "1" ] && DEF_FED=y || DEF_FED=N
   [ "$ENABLE_CALLS" = "1" ] && DEF_CALL=Y || DEF_CALL=n
-  [ "$ENABLE_WEB" = "0" ] && DEF_WEB=n || DEF_WEB=Y
   [ "$ENABLE_ADMIN" = "0" ] && DEF_ADMIN=n || DEF_ADMIN=Y
-  [ "$ENABLE_OPRF" = "1" ] && DEF_OPRF=Y || DEF_OPRF=n
-  echo ""; echo "$(L "Current" "当前"): $(L Reg 注册)[$REG_MODE] · $(L Federation 联邦)[$([ "$ENABLE_FEDERATION" = "1" ] && L on 开 || L off 关)] · $(L Calls 通话)[$([ "$ENABLE_CALLS" = "1" ] && L on 开 || L off 关)] · $(L Web 网页客户端)[$([ "$ENABLE_WEB" = "1" ] && L on 开 || L off 关)] · $(L Admin 管理后台)[$([ "$ENABLE_ADMIN" = "1" ] && L on 开 || L off 关)] · $(L Big-files 大文件)[$(human "${SAVED_BYTES:-4294967296}")]"
+  echo ""; echo "$(L "Isolation + hardening: VeilX island (fixed) — reg=token, federation=off, VeilX-only, no Element Web, privacy on, OPRF on." "隔离+加固: VeilX 孤岛(固定)—— 注册=令牌、联邦=关、只面向VeilX、不装Element Web、隐私加固开、OPRF开。")"
+  echo "$(L "Current (adjustable)" "当前(可调)"): $(L Calls 通话)[$([ "$ENABLE_CALLS" = "1" ] && L on 开 || L off 关)] · $(L Admin 管理后台)[$([ "$ENABLE_ADMIN" = "1" ] && L on 开 || L off 关)] · $(L Big-files 大文件)[$(human "${SAVED_BYTES:-4294967296}")]"
   echo "$(L "Press Enter = keep current value." "直接回车 = 保持当前值。")"
-  REG_MODE=""; ENABLE_FEDERATION=""; ENABLE_CALLS=""; ENABLE_WEB=""; ENABLE_ADMIN=""; ENABLE_OPRF=""
+  # 只重问【功能项】;隔离/加固六项已锁死为孤岛默认,不清空、不再问。
+  ENABLE_CALLS=""; ENABLE_ADMIN=""
 fi
 
-if has_tty && { [ -z "$REG_MODE" ] || [ -z "$ENABLE_FEDERATION" ] || [ -z "$ENABLE_CALLS" ] || [ -z "$ENABLE_WEB" ] || [ -z "$ENABLE_ADMIN" ] || [ -z "$ENABLE_OPRF" ]; }; then
-  printf '\n%s%s%s\n' "$C_B$C_CYAN" "$(L "Install options: unsure? just press Enter for the recommended (already the most private, safest) values." "安装选项:看不懂就直接回车用推荐值(已是私密最安全组合)。")" "$C_RESET"
-
-  if [ -z "$REG_MODE" ]; then
-    printf '\n%s%s%s\n' "$C_B$C_CYAN" "$(L "[Option 1/7] Who can register" "【选项 1/7】谁能注册账号")" "$C_RESET"
-    printf '%s\n' "$(L "  [1] Invite token required (recommended) — only people you give the token to can register; the first registrant becomes admin.
-  [2] Fully open — anyone can register (very risky; do not use for business)." "  [1] 需注册令牌(推荐)—— 只有拿到你发的令牌的人才能注册;首个注册者=管理员。
-  [2] 完全开放 —— 任何人都能注册(风险极高,商用勿选)。")"
-    ask_opt "$(L "→ [1/2, Enter=$DEF_REG]: " "→ [1/2,回车=$DEF_REG]: ")" "$DEF_REG"
-    case "$REPLY" in 2) REG_MODE=open; warn "$(L "Open registration selected — at your own risk!" "已选开放注册,风险自负!")";; *) REG_MODE=token;; esac
-  fi
-
-  if [ -z "$ENABLE_FEDERATION" ]; then
-    printf '\n%s%s%s\n' "$C_B$C_CYAN" "$(L "[Option 2/7] Federation (connect to the external Matrix world)" "【选项 2/7】联邦互通(与外部 Matrix 世界相连)")" "$C_RESET"
-    printf '%s\n' "$(L "  [N] Off (recommended) — an island; outsiders cannot message your members. Smallest attack surface, best for confidentiality.
-  [y] On — can interoperate with matrix.org etc., but larger exposure." "  [N] 关闭(推荐)—— 孤岛,外人无法向你的成员发消息,攻击面最小,商密首选。
-  [y] 开启 —— 可与 matrix.org 等互通,暴露面变大。")"
-    ask_opt "$(L "→ [y/N, Enter=$DEF_FED]: " "→ [y/N,回车=$DEF_FED]: ")" "$DEF_FED"
-    case "$REPLY" in y|Y) ENABLE_FEDERATION=1;; *) ENABLE_FEDERATION=0;; esac
-  fi
+if has_tty && { [ -z "$ENABLE_CALLS" ] || [ -z "$ENABLE_ADMIN" ] || [ -z "$MAX_UPLOAD" ]; }; then
+  printf '\n%s%s%s\n' "$C_B$C_CYAN" "$(L "Install options: unsure? just press Enter for the recommended values. (Isolation + hardening are fixed by VeilX — not asked.)" "安装选项:看不懂就直接回车用推荐值。(隔离与加固已由 VeilX 写死,不再询问。)")" "$C_RESET"
 
   if [ -z "$ENABLE_CALLS" ]; then
-    printf '\n%s%s%s\n' "$C_B$C_CYAN" "$(L "[Option 3/7] Voice/video calls (Element Call)" "【选项 3/7】语音/视频通话(Element Call)")" "$C_RESET"
+    printf '\n%s%s%s\n' "$C_B$C_CYAN" "$(L "[Option 1/3] Voice/video calls (Element Call)" "【选项 1/3】语音/视频通话(Element Call)")" "$C_RESET"
     printf '%s\n' "$(L "  [n] Off (recommended first) — natively supported, but the call path is newer; get chat + big files stable first.
   [Y] On — also installs LiveKit + lk-jwt; needs two extra DNS records (livekit. / matrix-rtc.) and ports 7881/7882." "  [n] 关闭(推荐先关)—— tuwunel 原生支持,但通话链路较新;先跑稳聊天+大文件。
   [Y] 开启 —— 额外装 LiveKit + lk-jwt,需再加 livekit. / matrix-rtc. 两条 DNS 和 7881/7882 端口。")"
@@ -2447,31 +2658,36 @@ if has_tty && { [ -z "$REG_MODE" ] || [ -z "$ENABLE_FEDERATION" ] || [ -z "$ENAB
     case "$REPLY" in y|Y) ENABLE_CALLS=1;; *) ENABLE_CALLS=0;; esac
   fi
 
-  if [ -z "$ENABLE_WEB" ]; then
-    printf '\n%s%s%s\n' "$C_B$C_CYAN" "$(L "[Option 4/7] Web client on your own domain (Element Web)" "【选项 4/7】自家域名网页客户端(Element Web)")" "$C_RESET"
-    printf '%s\n' "$(L "  [Y] On (recommended) — host a web Element on your OWN domain: members open
-       https://your-domain to register, log in and chat — no element.io, no app.
-       Locked to your server, white-labelable; no extra DNS (uses root domain). ~30MB RAM.
-  [n] Off — members can only use the Element X app or app.element.io to log into your server." "  [Y] 开启(推荐)—— 在【你自己的域名】放一个网页版 Element:成员打开
-       https://你的域名 就能【直接注册、登录、聊天】,不用去 element.io、不用装 App。
-       锁定到你的服务器、可白标;放根域名不需再加 DNS。多占约 30MB 内存。
-  [n] 关闭 —— 成员只能用 Element X App 或 app.element.io 登录你的服务器。")"
-    ask_opt "$(L "→ [Y/n, Enter=$DEF_WEB]: " "→ [Y/n,回车=$DEF_WEB]: ")" "$DEF_WEB"
-    case "$REPLY" in n|N) ENABLE_WEB=0;; *) ENABLE_WEB=1;; esac
-  fi
-
   if [ -z "$ENABLE_ADMIN" ]; then
-    printf '\n%s%s%s\n' "$C_B$C_CYAN" "$(L "[Option 5/7] Web admin panel (Ketesa graphical panel)" "【选项 5/7】Web 管理后台(Ketesa 图形面板)")" "$C_RESET"
-    printf '%s\n' "$(L "  [Y] On (recommended) — host a mature graphical admin panel at admin.your-domain
-       (Ketesa, officially supported by tuwunel): manage users, issue/revoke invite codes,
-       view rooms/media, deactivate accounts, reset passwords — all in a browser, no commands.
-       Needs one extra 'admin.' DNS record. ~20MB RAM.
-  [n] Off — manage only via the command line (sudo tuwunel menu / admin-room commands)." "  [Y] 开启(推荐)—— 在【admin.你的域名】放一个成熟的图形管理面板(Ketesa,
-       tuwunel 官方支持):浏览器里【图形化】管理用户、发/吊销邀请码、看房间/媒体、
-       停用账号、改密码,不用敲命令。需再加一条 admin. 的 DNS。多占约 20MB 内存。
+    printf '\n%s%s%s\n' "$C_B$C_CYAN" "$(L "[Option 2/3] Web admin panel" "【选项 2/3】Web 管理后台")" "$C_RESET"
+    printf '%s\n' "$(L "  [Y] On (recommended) — a graphical admin panel at admin.your-domain: manage users,
+       issue/revoke invite codes, deactivate accounts, reset passwords — all in a browser.
+       You'll pick WHICH panel next. Needs one extra 'admin.' DNS record. ~20-60MB RAM.
+  [n] Off — manage only via the command line (sudo tuwunel menu / admin-room commands)." "  [Y] 开启(推荐)—— 在【admin.你的域名】放一个图形管理后台:浏览器里管理用户、
+       发/吊销邀请码、停用账号、改密码,不用敲命令。下一步选【用哪个后台】。
+       需再加一条 admin. 的 DNS。多占约 20-60MB 内存。
   [n] 关闭 —— 只用命令行(sudo tuwunel 菜单 / 管理员房间命令)管理。")"
     ask_opt "$(L "→ [Y/n, Enter=$DEF_ADMIN]: " "→ [Y/n,回车=$DEF_ADMIN]: ")" "$DEF_ADMIN"
     case "$REPLY" in n|N) ENABLE_ADMIN=0;; *) ENABLE_ADMIN=1;; esac
+    # 选用哪个后台:VeilX 自研(默认)/ Ketesa(通用 synapse-admin)。
+    if [ "$ENABLE_ADMIN" = 1 ] && [ -z "$ADMIN_UI" ]; then
+      printf '%s\n' "$(L "   Which panel?
+     [1] VeilX Admin (recommended) — our own, tailored to tuwunel: only shows features that
+         actually work here, VeilX-branded, and (later) VeilX-only powers: reports, remote wipe.
+     [2] Ketesa — the general synapse-admin panel; more Synapse pages, but several are broken on
+         tuwunel (it targets full Synapse)." "   用哪个后台?
+     [1] VeilX 自研(推荐)—— 我们自己写的,贴着 tuwunel:只显示这里真能用的功能,VeilX 品牌,
+         并(后续)带 VeilX 专属能力:举报、远程销毁。
+     [2] Ketesa —— 通用 synapse-admin 面板;Synapse 页面更多,但不少在 tuwunel 上是坏的
+         (它照完整 Synapse 做)。")"
+      ask_opt "$(L "   → [1/2, Enter=1]: " "   → [1/2,回车=1]: ")" "1"
+      case "$REPLY" in 2) ADMIN_UI=ketesa;; *) ADMIN_UI=veilx;; esac
+      # 没显式指定过子域名时,默认跟随后台类型:自研 → veilx.域名;Ketesa → admin.域名。
+      if [ -z "$ADMIN_SUB_SET" ]; then
+        case "$ADMIN_UI" in ketesa) ADMIN_SUB="admin";; *) ADMIN_SUB="veilx";; esac
+        A_HOST="$ADMIN_SUB.$DOMAIN"
+      fi
+    fi
     # 新装时可自定义后台子域名(默认 admin)。老服务器改子域走 `sudo tuwunel admin-url`。
     if [ "$ENABLE_ADMIN" = 1 ] && [ "$RECONFIG" -eq 0 ]; then
       while :; do
@@ -2487,7 +2703,7 @@ if has_tty && { [ -z "$REG_MODE" ] || [ -z "$ENABLE_FEDERATION" ] || [ -z "$ENAB
   fi
 
   if [ -z "$MAX_UPLOAD" ]; then
-    printf '\n%s%s%s\n' "$C_B$C_CYAN" "$(L "[Option 6/7] Max file size (send big files/photos/long videos)" "【选项 6/7】单文件上限(发大文件/大图/长视频)")" "$C_RESET"
+    printf '\n%s%s%s\n' "$C_B$C_CYAN" "$(L "[Option 3/3] Max file size (send big files/photos/long videos)" "【选项 3/3】单文件上限(发大文件/大图/长视频)")" "$C_RESET"
     echo "$(L "  Set any size (e.g. 4G / 4.5G / 512M / 1T); bigger uses more disk. Enter = 4G." "  设多大都行(如 4G / 4.5G / 512M / 1T);越大越占磁盘。回车=4G。")"
     while :; do
       ask_opt "$(L "→ Max file size [Enter=$(human "${SAVED_BYTES:-4294967296}")]: " "→ 单文件上限 [回车=$(human "${SAVED_BYTES:-4294967296}")]: ")" "${SAVED_BYTES:+$(human "$SAVED_BYTES")}"
@@ -2498,27 +2714,13 @@ if has_tty && { [ -z "$REG_MODE" ] || [ -z "$ENABLE_FEDERATION" ] || [ -z "$ENAB
     done
   fi
 
-  if [ -z "$ENABLE_OPRF" ]; then
-    printf '\n%s%s%s\n' "$C_B$C_CYAN" "$(L "[Option 7/7] VeilX hardening: server-assisted PIN" "【选项 7/7】VeilX 加固:服务器辅助 PIN")" "$C_RESET"
-    printf '%s\n' "$(L "  [Y] On (recommended) — a tiny extra service on THIS server. VeilX phones then need
-       it to unlock, which means: a seized phone that is OFFLINE can never be
-       brute-forced, and you can remotely destroy a detained member's key so their
-       phone becomes permanently unopenable. No new domain/DNS/cert needed.
-       Adds ~2-5 min to install (compiles once) and ~30MB RAM.
-  [n] Off — phones still use PIN + hardware encryption, just without this extra layer." "  [Y] 开启(推荐)—— 在【这台服务器】上多跑一个很小的服务。VeilX 手机解锁时要问它,
-       于是:被抄走且【离线】的手机永远无法爆破 PIN;成员被抓时你可远程销毁其密钥,
-       让那台手机永久打不开。不需要新域名/新 DNS/新证书。
-       安装多花约 2-5 分钟(只编译一次),多占约 30MB 内存。
-  [n] 关闭 —— 手机仍有 PIN + 硬件加密,只是少这一层。")"
-    ask_opt "$(L "→ [Y/n, Enter=$DEF_OPRF]: " "→ [Y/n,回车=$DEF_OPRF]: ")" "$DEF_OPRF"
-    case "$REPLY" in n|N) ENABLE_OPRF=0;; *) ENABLE_OPRF=1;; esac
-  fi
 fi
 REG_MODE="${REG_MODE:-token}"; ENABLE_FEDERATION="${ENABLE_FEDERATION:-0}"; ENABLE_CALLS="${ENABLE_CALLS:-0}"; ENABLE_WEB="${ENABLE_WEB:-1}"; ENABLE_ADMIN="${ENABLE_ADMIN:-1}"
 case "$ENABLE_FEDERATION" in 1) :;; *) ENABLE_FEDERATION=0;; esac
 case "$ENABLE_CALLS" in 1) :;; *) ENABLE_CALLS=0;; esac
 case "$ENABLE_WEB" in 0) :;; *) ENABLE_WEB=1;; esac
 case "$ENABLE_ADMIN" in 0) :;; *) ENABLE_ADMIN=1;; esac
+case "$ADMIN_UI" in ketesa) :;; *) ADMIN_UI=veilx;; esac   # 默认 VeilX 自研后台
 ENABLE_OPRF="${ENABLE_OPRF:-1}"; case "$ENABLE_OPRF" in 0) :;; *) ENABLE_OPRF=1;; esac
 case "$ENABLE_ELEMENTX" in 0) :;; *) ENABLE_ELEMENTX=1;; esac
 case "$ENABLE_PRIVACY" in 0) :;; *) ENABLE_PRIVACY=1;; esac
@@ -2725,6 +2927,24 @@ PROXY_FP="$(env_get PROXY_FP)"; PROXY_HOST="$(env_get PROXY_HOST)"
 LK_KEY="$(env_get LIVEKIT_API_KEY)"; [ -n "$LK_KEY" ] || LK_KEY="API$(openssl rand -hex 6)"
 LK_SECRET="$(env_get LIVEKIT_API_SECRET)"; [ -n "$LK_SECRET" ] || LK_SECRET="$(openssl rand -hex 32)"
 
+# VEILX_ONLY 的连带效果:别家客户端的入口必须一起关掉,否则"只支持 VeilX"只是句空话。
+# Element Web 是竞品客户端本身;oidc_native_auth 那条原生 OIDC 就是专门给 Element X
+# 自助注册用的 —— 留着它们等于服务器一边挡 Element、一边把 Element 递给用户。
+case "$VEILX_ONLY" in
+  0|"") VEILX_ONLY="${VEILX_ONLY:-0}" ;;
+  strict)
+    # strict = 连图形后台都不装。普通档(1)已经没有任何绕过口子了(后台走同源的 admin
+    # 主机,只放行它真正要用的十来个端点,里面没有 /sync 也没有 /send),所以 strict
+    # 纯粹是"连这十来个端点也不想暴露"的更保守选择,代价是只能用命令行管理。
+    ENABLE_WEB=0; ENABLE_ELEMENTX=0
+    if [ "$ENABLE_ADMIN" = "1" ]; then
+      warn "$(L "VEILX_ONLY=strict: not installing the graphical admin panel. Manage from: sudo tuwunel" "VEILX_ONLY=strict:不安装图形管理后台。请用 sudo tuwunel 命令行菜单管理。")"
+    fi
+    ENABLE_ADMIN=0 ;;
+  *)
+    VEILX_ONLY=1; ENABLE_WEB=0; ENABLE_ELEMENTX=0 ;;
+esac
+
 cat > .env <<EOF
 # ===== tuwunel 一键部署机密(勿泄露/删除) $(date +%F) =====
 MATRIX_DOMAIN=$DOMAIN
@@ -2736,6 +2956,7 @@ ENABLE_FEDERATION=$ENABLE_FEDERATION
 ENABLE_CALLS=$ENABLE_CALLS
 ENABLE_WEB=$ENABLE_WEB
 ENABLE_ADMIN=$ENABLE_ADMIN
+ADMIN_UI=$ADMIN_UI
 ADMIN_SUB=$ADMIN_SUB
 ENABLE_ELEMENTX=$ENABLE_ELEMENTX
 ENABLE_PRIVACY=$ENABLE_PRIVACY
@@ -2749,6 +2970,7 @@ PROXY_FP=$PROXY_FP
 PROXY_HOST=$PROXY_HOST
 USE_CDN=$USE_CDN
 CF_ORIGIN=$CF_ORIGIN
+VEILX_ONLY=$VEILX_ONLY
 MAX_UPLOAD_BYTES=$MAX_UPLOAD_BYTES
 TUWUNEL_MEM=$TUWUNEL_MEM
 LIVEKIT_API_KEY=$LK_KEY
@@ -2803,9 +3025,11 @@ require_auth_for_profile_requests = true
 allow_inbound_profile_lookup_federation_requests = false
 allow_device_name_federation = false
 allow_public_room_directory_without_auth = false
-lockdown_public_room_directory = true
 allow_unlisted_room_search_by_id = false
-show_all_local_users_in_user_directory = false
+# 注:show_all_local_users_in_user_directory 与 lockdown_public_room_directory 属于
+# 【团队可发现性】,不在这里设 —— 它们由上面 [global] 统一按"团队通讯录"模型放开
+# (元数据最小化 ≠ 关掉团队内部的用户/房间发现,两者是两回事)。此处若重复设置会与
+# [global] 冲突(同一 key 出现两次),故刻意留在 [global]。
 
 # 管理房操作流水:默认会把注册/改密码/停用推进管理房,形成可读的元数据流水
 admin_room_notices = false
@@ -2840,6 +3064,18 @@ encryption_enabled_by_default_for_room_type = "all"
 grant_admin_to_first_user = true # 第一个注册的人=服务器管理员
 create_admin_room = true
 new_user_displayname_suffix = "" # 去掉默认昵称后缀
+# 【团队通讯录】默认 false 时,搜索只返回"和你同过房 / 在公开房间里"的人 —— 一个刚注册、
+# 还没进任何房的同事谁都搜不到。VeilX 是团队服务器,设 true 让任何成员都能在搜索里找到
+# 本服【全部】用户。这只影响【用户目录】的可见性:私密房间不受影响,外服用户由客户端域名
+# 过滤挡在门外。要退回"只显示见过的人"把这行删掉即可。
+show_all_local_users_in_user_directory = true
+# 【团队通讯录·房间】默认 false=普通成员就能把自己建的公开房发布到目录,别人才搜得到。
+# 设 true 会锁成"只有管理员能发布",于是成员建的公开房永远进不了目录、谁都搜不到
+# (客户端建公开房时发布被拒,会退回"不发布",房间存在但搜索为空)。VeilX 要成员能自助
+# 建可被发现的群,这里必须放开。要收紧成"管理员审核制"就改成 true。
+lockdown_public_room_directory = false
+# 公开房间目录:不对联邦开放(下行),但本服已登录成员仍可查询 —— 通讯录里的"公开房间/群组"
+# 靠的就是它,私密房间不发布就不进目录。
 allow_public_room_directory_over_federation = false
 $OIDC_LINE
 $FED_LINE
@@ -2853,6 +3089,383 @@ server = "$M_HOST:443"
 $WK_LIVEKIT
 EOF
 chmod 600 tuwunel.toml
+
+# ===== VEILX_ADMIN_FILES (generated by scripts/sync-admin.py — do not edit by hand) =====
+# 把自研管理后台静态文件解包到 $1。内容 = index/css/js + logo(gzip tar → base64)。
+# 由 scripts/sync-admin.py 从 veilx-admin/ 生成;别手改这段 base64。
+veilx_admin_write_files() {
+  local dir="${1:?veilx_admin_write_files: missing dir}"; mkdir -p "$dir"
+  base64 -d <<'VEILX_ADMIN_B64' | tar xzf - -C "$dir"
+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
+VEILX_ADMIN_B64
+}
+# ===== /VEILX_ADMIN_FILES =====
 
 # ---- docker-compose.yml ----
 cat > docker-compose.yml <<EOF
@@ -2931,8 +3544,9 @@ cat >> docker-compose.yml <<'EOF'
 EOF
 fi
 
-# 自托管 Web 管理后台 Ketesa(synapse-admin,tuwunel 官方支持;放 admin.你的域名)
-if [ "$ENABLE_ADMIN" = "1" ]; then
+# 自托管 Web 管理后台。ADMIN_UI=ketesa 时才起 Ketesa 容器;VeilX 自研后台是纯静态,
+# 不需要单独容器——由 Caddy 的 file_server 直接托管(见下方 veilx-admin 挂载与 Caddy 配置)。
+if [ "$ENABLE_ADMIN" = "1" ] && [ "$ADMIN_UI" = "ketesa" ]; then
 cat >> docker-compose.yml <<'EOF'
 
   ketesa:
@@ -2950,7 +3564,7 @@ EOF
 fi
 
 # VeilX 加固:服务器辅助 PIN(OPRF)。保管每账号的 ristretto255 密钥 k,对客户端盲化点算 k·B。
-# 它看不到 PIN、不下发 k;因为解锁必须问它,被抄走且离线的手机就无法爆破 PIN。
+# 它看不到 PIN、不下发 k;因为解锁必须问它,失窃且离线的手机就无法爆破 PIN。
 if [ "$ENABLE_OPRF" = "1" ]; then
   oprf_write_files
 cat >> docker-compose.yml <<'EOF'
@@ -2986,6 +3600,7 @@ cat >> docker-compose.yml <<'EOF'
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - ./cf-origin:/etc/caddy/cf:ro          # 全橙云用的 CF Origin 证书(没开时是空目录,无副作用)
+      - ./veilx-admin:/srv/veilx-admin:ro     # VeilX 自研后台静态文件(ADMIN_UI=veilx 时由 file_server 托管;否则是空目录,无副作用)
       - ./data/caddy/data:/data
       - ./data/caddy/config:/config
     mem_limit: 128m
@@ -3023,16 +3638,26 @@ else
   ROOT_HANDLE="respond \"$DOMAIN — Matrix (tuwunel)\" 200"
 fi
 
-# ---- Ketesa 管理后台配置(锁定到本服务器,隐藏服务器输入框)----
-if [ "$ENABLE_ADMIN" = "1" ]; then
-  # restrictBaseUrl 为单个字符串 = 移除并锁死"服务器地址"输入框,用户只能连你这台。
-  # wellKnownDiscovery=false = 直连 matrix.域名(它同时提供 /_matrix 与 /_synapse/admin),不依赖 well-known 可达性。
+# ---- 管理后台文件:按 ADMIN_UI 写对应的一份 ----
+# veilx-admin 目录始终存在(Caddy 恒挂载它;不用时是空目录,无副作用)。
+mkdir -p veilx-admin
+if [ "$ENABLE_ADMIN" = "1" ] && [ "$ADMIN_UI" = "veilx" ]; then
+  # VeilX 自研后台:纯静态,解包到 veilx-admin/,由 Caddy file_server 托管(见 Caddyfile 的 $A_HOST 块)。
+  # 面板同源调用 /_matrix、/_synapse、/oprf —— 都由那块的 handle 反代给 tuwunel / oprf。
+  veilx_admin_write_files veilx-admin
+  chmod -R a+rX veilx-admin   # Caddy 以非 root 运行,静态文件须可读(无机密)
+  rm -f ketesa-config.json 2>/dev/null || true
+elif [ "$ENABLE_ADMIN" = "1" ] && [ "$ADMIN_UI" = "ketesa" ]; then
+  # Ketesa 配置:restrictBaseUrl 锁死"服务器地址"输入框,指向 admin 主机自己(同源、免 CORS、
+  # 无需在 matrix 主机为后台开例外)。wellKnownDiscovery=false = 直连 admin 主机上的 /_matrix 与 /_synapse。
+  find veilx-admin -mindepth 1 -delete 2>/dev/null || true   # 清空未用的自研后台文件
   cat > ketesa-config.json <<EOF
-{"restrictBaseUrl":"https://$M_HOST","wellKnownDiscovery":false}
+{"restrictBaseUrl":"https://$A_HOST","wellKnownDiscovery":false}
 EOF
-  chmod 644 ketesa-config.json   # 关键!Ketesa 以非 root(sws)运行,须可读;此文件无机密(仅指向你的服务器地址)
+  chmod 644 ketesa-config.json   # Ketesa 以非 root(sws)运行,须可读;无机密(仅指向你的服务器地址)
 else
   rm -f ketesa-config.json 2>/dev/null || true
+  find veilx-admin -mindepth 1 -delete 2>/dev/null || true
 fi
 
 # ---- Caddyfile ----
@@ -3042,6 +3667,33 @@ if [ "$CF_ORIGIN" = "1" ]; then
   TLS_LINE="	tls /etc/caddy/cf/origin.pem /etc/caddy/cf/origin.key"
 else
   TLS_LINE=""
+fi
+# 只面向 VeilX 客户端:拒绝 User-Agent 不含 VeilX 的 /_matrix/client/* 与
+# /_synapse/admin/*。三条刻意的例外,少一条就会打到自己人:
+#  · /_matrix/client/versions —— 规范规定它是公开的,而且安装器的就绪检查、
+#    菜单的在线检查、客户端的"主服务器加速"验证都在打它(那几处是裸 curl/URLSession)。
+#  · 管理后台**不在这里开例外**。Ketesa 改成同源走 admin 主机(见 ketesa-config.json),
+#    它需要的那十来个端点在 admin 主机上单独放行 —— 那份清单里没有 /sync、没有
+#    /rooms/*/messages、没有 /send,所以就算有人把 Element 指过去也同步不了、发不出。
+#    早先版本在这里放行 `Origin: https://admin.<域名>`,那是个人人可用的口子:
+#    Origin 同样是请求方自述的,而 admin 子域是公开 DNS —— 加一个请求头即可绕过整道拦截。
+#  · /_matrix/federation/* 与 /_matrix/key/* 不在拦截范围内 —— 联邦流量不带 UA 约束,
+#    否则一旦开启联邦会整个断掉。
+# ⚠️ UA 与 Origin 都是请求方自述的字符串,伪造成本约等于零;已登录的会话也不受影响。
+# 这一层挡的是"随手装了个 Element 的同事",不是有心人。
+if [ "$VEILX_ONLY" != "0" ]; then
+  VEILX_GATE="	@notveilx {
+		path /_matrix/client/* /_synapse/admin/*
+		not path /_matrix/client/versions
+		not header User-Agent *VeilX*
+	}
+	handle @notveilx {
+		header Content-Type application/json
+		respond \`{\"errcode\":\"M_FORBIDDEN\",\"error\":\"This homeserver serves VeilX clients only.\"}\` 403
+	}
+"
+else
+  VEILX_GATE=""
 fi
 # OPRF 挂在 matrix.域名/oprf/ 这个路径上:复用现有证书,不需要新域名/新 DNS。
 if [ "$ENABLE_OPRF" = "1" ]; then
@@ -3086,39 +3738,68 @@ cat >> Caddyfile <<EOF
 
 $M_HOST {
 $TLS_LINE
-	@reportstub path /_synapse/admin/v1/event_reports /_synapse/admin/v1/user_reports
-	@opts method OPTIONS
-	@ev path /_synapse/admin/v1/event_reports
-	@ur path /_synapse/admin/v1/user_reports
-	handle @reportstub {
-		route {
-			header Access-Control-Allow-Origin "*"
-			header Access-Control-Allow-Methods "GET, OPTIONS"
-			header Access-Control-Allow-Headers "Authorization, Content-Type"
-			header Access-Control-Max-Age "86400"
-			header Content-Type "application/json"
-			respond @opts 204
-			respond @ev \`{"event_reports":[],"total":0}\` 200
-			respond @ur \`{"user_reports":[],"total":0}\` 200
-		}
-	}
-$OPRF_ROUTE
+$VEILX_GATE$OPRF_ROUTE
 	handle {
 		reverse_proxy tuwunel:8008
 	}
 }
+EOF
+# 管理子域 admin.域名:按 ADMIN_UI 出不同块。两者都把 /_matrix、/_synapse 白名单反代给 tuwunel;
+# 区别在"非 API 路径":Ketesa=其静态容器;VeilX 自研=Caddy file_server 直接托管 veilx-admin/。
+if [ "$ADMIN_UI" = "ketesa" ]; then
+cat >> Caddyfile <<EOF
 
 $A_HOST {
 $TLS_LINE
-	reverse_proxy ketesa:8080
+	@opts method OPTIONS
+	@ev path /_synapse/admin/v1/event_reports
+	@ur path /_synapse/admin/v1/user_reports
+	handle @ev {
+		route {
+			header Content-Type "application/json"
+			respond @opts 204
+			respond \`{"event_reports":[],"total":0}\` 200
+		}
+	}
+	handle @ur {
+		route {
+			header Content-Type "application/json"
+			respond @opts 204
+			respond \`{"user_reports":[],"total":0}\` 200
+		}
+	}
+	@ketesa_api path /_synapse/* /_matrix/media/* /_matrix/client/versions /_matrix/client/v1/* /_matrix/client/unstable/org.matrix.msc2965/auth_metadata /_matrix/client/v3/login /_matrix/client/v3/login/* /_matrix/client/v3/logout /_matrix/client/v3/account/whoami /_matrix/client/v3/profile/* /_matrix/client/v3/publicRooms /_matrix/client/v3/user/* /_matrix/client/v3/directory/*
+	handle @ketesa_api {
+		reverse_proxy tuwunel:8008
+	}
+	handle {
+		reverse_proxy ketesa:8080
+	}
 }
 EOF
 else
 cat >> Caddyfile <<EOF
 
-$M_HOST {
+$A_HOST {
 $TLS_LINE
 $OPRF_ROUTE
+	@vxadmin_api path /_synapse/* /_matrix/media/* /_matrix/client/versions /_matrix/client/v1/* /_matrix/client/unstable/org.matrix.msc2965/auth_metadata /_matrix/client/v3/login /_matrix/client/v3/login/* /_matrix/client/v3/logout /_matrix/client/v3/account/whoami /_matrix/client/v3/profile/* /_matrix/client/v3/publicRooms /_matrix/client/v3/user/* /_matrix/client/v3/directory/*
+	handle @vxadmin_api {
+		reverse_proxy tuwunel:8008
+	}
+	handle {
+		root * /srv/veilx-admin
+		file_server
+	}
+}
+EOF
+fi
+else
+cat >> Caddyfile <<EOF
+
+$M_HOST {
+$TLS_LINE
+$VEILX_GATE$OPRF_ROUTE
 	handle {
 		reverse_proxy tuwunel:8008
 	}
@@ -3262,7 +3943,7 @@ $(L "Client login: " "客户端登录:")  $(L "also Element X app / app.element.
 $(L "Admin user:   " "管理员账号:")  $ADMIN_USER   (ID: @$ADMIN_USER:$DOMAIN)
 $(L "Admin password:" "管理员密码:")  $ADMIN_PASS
 $([ -n "$ADMIN_URL" ] && echo "$(L "Web admin panel:" "Web 管理后台:")  $ADMIN_URL   $(L "(log in with the admin user/password above; graphical user/invite/room management)" "(用上面的管理员账号密码登录;图形化管理用户/邀请码/房间)")")
-$(L "Registration token:" "注册令牌:")  $REG_TOKEN
+$(L "Registration token:" "注册令牌:")  $REG_TOKEN$([ "$VEILX_ONLY" != "0" ] && L "   (used internally by adduser — do NOT hand this to members: with VeilX-only on, nothing can self-register)" "   (仅供 adduser 内部使用 —— 不要发给成员:开了仅-VeilX 之后没有任何客户端能自助注册)")
 $(L "Add member:   " "加成员:    ")  sudo bash tuwunel-installer.sh adduser
 $(L "Max file size:" "单文件上限:")  $(human "$MAX_UPLOAD_BYTES")   (MAX_UPLOAD=10G sudo -E bash tuwunel-installer.sh config)
 $(L "★ Must back up:" "★ 必须备份:")  $(L "the whole data/tuwunel dir (database + all media) + tuwunel.toml + .env" "整个 data/tuwunel 目录(含数据库与全部媒体)+ tuwunel.toml + .env")
@@ -3290,9 +3971,17 @@ ${C_GREEN}========================================================${C_RESET}
  ${C_B}${C_GREEN}$(L "🎉 tuwunel deployment complete!" "🎉 tuwunel 部署完成!")${C_RESET}  ${C_B}$DOMAIN${C_RESET}
  ($(L reg 注册)[$REG_MODE] · $(L federation 联邦)[$([ "$ENABLE_FEDERATION" = 1 ] && L on 开 || L off 关)] · $(L calls 通话)[$([ "$ENABLE_CALLS" = 1 ] && L on 开 || L off 关)] · $(L web 网页客户端)[$([ "$ENABLE_WEB" = 1 ] && L on 开 || L off 关)] · $(L admin 管理后台)[$([ "$ENABLE_ADMIN" = 1 ] && L on 开 || L off 关)] · $(L phone-signup 手机App注册)[$([ "$ENABLE_ELEMENTX" = 1 ] && L on 开 || L off 关)] · $(L big-files 大文件)[$(human "$MAX_UPLOAD_BYTES")] · $(L "engine tuwunel/Rust, no Postgres" "引擎 tuwunel/Rust,免Postgres"))
 
- ${C_B}${C_YELLOW}$(L "Member signup / login" "成员注册 / 登录")${C_RESET}$([ -n "$WEB_URL" ] && printf '\n   %s' "$(L "Web (recommended): open $C_B$C_GREEN$WEB_URL$C_RESET in a browser to register & log in — your own domain, no element.io, no app (works in mobile browsers too)." "网页版(推荐):浏览器打开 $C_B$C_GREEN$WEB_URL$C_RESET 直接注册登录 —— 你自己的域名,不用去 element.io、不用装 App(手机浏览器也能用)。")")
-   $(L "Phone app: install ${C_B}Element X${C_RESET} (app store) → server address = ${C_B}$DOMAIN${C_RESET} → " "手机 App:装 ${C_B}Element X${C_RESET}(应用商店)→ 服务器地址填 ${C_B}$DOMAIN${C_RESET} → ")$([ "$ENABLE_ELEMENTX" = 1 ] && L "register directly (invite token required) or log in — native OIDC is on" "可【直接注册】(需邀请码)或登录 —— 已开启原生 OIDC" || L "log in with username + password (Element X can't register; create accounts via web or adduser below)" "用【用户名+密码登录】(Element X 不支持注册;账号请走网页或下面的 adduser)")
-$([ "$REG_MODE" = "token" ] && L "   (invite token is in CREDENTIALS.txt; or run sudo tuwunel adduser to create an account and send it to the member, who logs in with Element X using the password)" "   (邀请码在 CREDENTIALS.txt;或直接 sudo tuwunel adduser 建好账号发给成员,成员用 Element X 密码登录)")
+ ${C_B}${C_YELLOW}$(L "Member signup / login" "成员注册 / 登录")${C_RESET}
+$(if [ "$VEILX_ONLY" != "0" ]; then
+    printf '   %s\n   %s\n   %s' \
+      "$(L "This server serves VeilX only, so members do NOT self-register — you create the account:" "本服务器只面向 VeilX,因此成员【不能自助注册】,由你建号:")" \
+      "$(L "  1) ${C_B}sudo tuwunel adduser${C_RESET}  → prints a username + password" "  1) ${C_B}sudo tuwunel adduser${C_RESET}  → 打印用户名和密码")" \
+      "$(L "  2) Send the member: server ${C_B}$DOMAIN${C_RESET} + that username/password; they sign in from VeilX." "  2) 把【服务器 ${C_B}$DOMAIN${C_RESET} + 该用户名密码】发给成员,让 TA 在 VeilX 里登录。")"
+  else
+    [ -n "$WEB_URL" ] && printf '   %s\n' "$(L "Web: open $C_B$C_GREEN$WEB_URL$C_RESET in a browser to register & log in." "网页版:浏览器打开 $C_B$C_GREEN$WEB_URL$C_RESET 直接注册登录。")"
+    printf '   %s%s' "$(L "Phone app: install ${C_B}Element X${C_RESET} → server = ${C_B}$DOMAIN${C_RESET} → " "手机 App:装 ${C_B}Element X${C_RESET} → 服务器填 ${C_B}$DOMAIN${C_RESET} → ")" "$([ "$ENABLE_ELEMENTX" = 1 ] && L "register directly (invite token required) or log in." "可【直接注册】(需邀请码)或登录。" || L "log in with username + password (Element X cannot register here)." "用【用户名+密码登录】(此处 Element X 不能注册)。")"
+    [ "$REG_MODE" = "token" ] && printf '\n   %s' "$(L "(invite token is in CREDENTIALS.txt)" "(邀请码在 CREDENTIALS.txt)")"
+  fi)
 
  ${C_B}${C_YELLOW}$(L "Admin (created automatically — no manual signup)" "管理员(已自动创建,不用你手动注册)")${C_RESET}
 $ADMIN_INFO
