@@ -658,7 +658,12 @@ backup_run() {   # 非交互,供 cron 调用;密钥读 .backup-key,目录/保留
   fi
   ts="$(date +%F-%H%M%S)"; f="$dir/tuwunel-backup-$ts.tar.gz.enc"
   docker compose stop tuwunel >/dev/null 2>&1 || true
-  ( umask 077; tar czf - .env tuwunel.toml data/tuwunel 2>/dev/null \
+  # 【必须一起备份 data/oprf】最高档(服务器辅助 PIN)的每账号密钥 k 只存在这里 ——
+  # 丢了它,所有最高档用户的本地消息库【永远打不开】,备份里的聊天记录也救不回来
+  # (库是用 PIN+k 派生的密钥加的);signing.key 也在里面,丢了远程停用的签名就验不过。
+  BK_PATHS=".env tuwunel.toml data/tuwunel"
+  [ -d data/oprf ] && BK_PATHS="$BK_PATHS data/oprf"
+  ( umask 077; tar czf - $BK_PATHS 2>/dev/null \
       | BKPW="$(cat "$keyf")" openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -pass env:BKPW -out "$f" 2>/dev/null ) || true
   docker compose start tuwunel >/dev/null 2>&1 || docker compose up -d >/dev/null 2>&1 || true
   chmod 600 "$f" 2>/dev/null || true
@@ -751,12 +756,15 @@ menu_backup() {
   fi
   echo "$(L "==> Stopping the service to back up RocksDB consistently (packing a live DB may corrupt it)…" "==> 停止服务以一致地备份 RocksDB(库不停止直接打包可能损坏)…")"
   docker compose stop tuwunel >/dev/null 2>&1 || true
+  # data/oprf 同上:最高档的每账号密钥 k 与 signing.key 都在里面,不备份=最高档用户数据永久锁死。
+  BK_PATHS=".env CREDENTIALS.txt tuwunel.toml data/tuwunel"
+  [ -d data/oprf ] && BK_PATHS="$BK_PATHS data/oprf"
   if [ -n "$pw" ]; then
     # 口令走环境变量(不进 argv/ps),openssl 从 stdin 读 tar 流并加密
-    tar czf - .env CREDENTIALS.txt tuwunel.toml data/tuwunel 2>/dev/null \
+    tar czf - $BK_PATHS 2>/dev/null \
       | BKPW="$pw" openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -pass env:BKPW -out "$f" 2>/dev/null || true
   else
-    tar czf "$f" .env CREDENTIALS.txt tuwunel.toml data/tuwunel 2>/dev/null || true
+    tar czf "$f" $BK_PATHS 2>/dev/null || true
   fi
   docker compose start tuwunel >/dev/null 2>&1 || docker compose up -d >/dev/null 2>&1 || true
   chmod 600 "$f" 2>/dev/null || true
@@ -2492,8 +2500,8 @@ if [ "$RECONFIG" -eq 0 ] && [ -f "$INSTALL_DIR/CREDENTIALS.txt" ] \
 └──────────────────────────────────────────────┘
   1) $(L "View running status" "查看运行状态")
   2) $(L "Add a team member (one command: create account + set password)" "添加团队成员(一条命令建号并设密码)")
-  3) $(L "Change config (registration / federation / calls / web / admin / big files)" "修改配置(注册 / 联邦 / 通话 / 网页 / 后台 / 大文件)")
-  4) $([ "$(env_saved ENABLE_ADMIN)" = "1" ] && L "Disable Web admin panel (Ketesa)" "关闭 Web 管理后台(Ketesa)" || L "Enable Web admin panel (Ketesa; add to an existing server)" "开启 Web 管理后台(Ketesa,老服务器补装)")
+  3) $(L "Change config (admin panel: VeilX / Ketesa · calls · file size)" "修改配置(管理后台:VeilX自研/Ketesa · 通话 · 文件上限)")
+  4) $([ "$(env_saved ENABLE_ADMIN)" = "1" ] && L "Disable Web admin panel" "关闭 Web 管理后台" || L "Enable Web admin panel (VeilX Admin; add to an existing server)" "开启 Web 管理后台(VeilX 自研,老服务器补装)")
   5) $(L "Back up now (config + database + media)" "立即备份(配置 + 数据库 + 媒体)")
   6) $(L "Upgrade service images (docker pull latest)" "升级服务镜像(docker 拉最新)")
   7) $(L "Clean up disk" "清理磁盘")
@@ -2582,7 +2590,7 @@ until domain_ok "$DOMAIN"; do
 done
 
 ACME_EMAIL="${ACME_EMAIL:-admin@$DOMAIN}"
-M_HOST="matrix.$DOMAIN"; LK_HOST="livekit.$DOMAIN"; RTC_HOST="matrix-rtc.$DOMAIN"
+M_HOST="matrix.$DOMAIN"; LK_HOST="livekit.$DOMAIN"; RTC_HOST="matrix-rtc.$DOMAIN"; CALL_HOST="call.$DOMAIN"
 # 管理后台子域名(默认 admin;可改成 console/manage 等)。ADMIN_SUB= 预设或安装时选择,存 .env。
 _ADMIN_SUB_ENV="${ADMIN_SUB:-}"                                  # 记录是否由环境变量显式传入(用于 EXPLICIT 判定)
 ADMIN_SUB="${ADMIN_SUB:-$(env_saved ADMIN_SUB)}"                 # 环境变量 > 旧配置;都没有则留空,下面按后台类型定默认
@@ -2731,7 +2739,7 @@ else MAX_UPLOAD_BYTES=4294967296; fi
 
 REQUIRED_HOSTS="$DOMAIN $M_HOST"; PORT_LINE="80/tcp 443/tcp 443/udp"
 [ "$ENABLE_ADMIN" = "1" ] && REQUIRED_HOSTS="$REQUIRED_HOSTS $A_HOST"
-if [ "$ENABLE_CALLS" = "1" ]; then REQUIRED_HOSTS="$REQUIRED_HOSTS $LK_HOST $RTC_HOST"; PORT_LINE="80/tcp 443/tcp 443/udp 7881/tcp 7882/udp"; fi
+if [ "$ENABLE_CALLS" = "1" ]; then REQUIRED_HOSTS="$REQUIRED_HOSTS $LK_HOST $RTC_HOST $CALL_HOST"; PORT_LINE="80/tcp 443/tcp 443/udp 7881/tcp 7882/udp"; fi
 echo ""
 printf '  %s%s[%s] · %s[%s] · %s[%s] · %s[%s] · %s[%s] · %s[%s] · %s[%s]%s\n' "$C_GREEN" \
   "$(L '✔ Config: reg' '✔ 配置: 注册')" "$REG_MODE" \
@@ -2750,7 +2758,8 @@ if has_tty && [ "$RECONFIG" -eq 0 ]; then
       $A_HOST"
   [ "$ENABLE_CALLS" = "1" ] && DNS_LINES="$DNS_LINES
       $LK_HOST
-      $RTC_HOST"
+      $RTC_HOST
+      $CALL_HOST"
   cat <<EOF
 
 ${C_CYAN}┌──────────────────────────────────────────────────────────┐${C_RESET}
@@ -3523,6 +3532,19 @@ cat >> docker-compose.yml <<'EOF'
       - "7882:7882/udp"
     mem_limit: 256m
     networks: [internal]
+
+  # 自托管通话前端 —— 不再从 call.element.io 拉界面。
+  # 媒体本来就走自己的 LiveKit;把这一层也拿回来之后,通话链路【完全在自己服务器上】,
+  # 断开外网也能内部通话,element.io 也看不到"谁在什么时候开了通话"这类元数据。
+  element-call:
+    image: ghcr.io/element-hq/element-call:latest
+    restart: unless-stopped
+    logging: *log
+    security_opt: ["no-new-privileges:true"]
+    volumes:
+      - ./element-call-config.json:/app/config.json:ro
+    mem_limit: 128m
+    networks: [internal]
 EOF
 fi
 
@@ -3612,7 +3634,9 @@ EOF
 
 # ---- well-known JSON(开通话则带 rtc_foci)----
 if [ "$ENABLE_CALLS" = "1" ]; then
-  CLIENT_WK="{\"m.homeserver\":{\"base_url\":\"https://$M_HOST\"},\"org.matrix.msc4143.rtc_foci\":[{\"type\":\"livekit\",\"livekit_service_url\":\"https://$RTC_HOST\"}]}"
+  # 通告自建通话前端(`io.element.call.url`):客户端据此自动指向 call.你的域名,
+# 用户不必手动填,也就不会再落回 call.element.io。
+CLIENT_WK="{\"m.homeserver\":{\"base_url\":\"https://$M_HOST\"},\"org.matrix.msc4143.rtc_foci\":[{\"type\":\"livekit\",\"livekit_service_url\":\"https://$RTC_HOST\"}],\"io.element.call.url\":\"https://$CALL_HOST\"}"
 else
   CLIENT_WK="{\"m.homeserver\":{\"base_url\":\"https://$M_HOST\"}}"
 fi
@@ -3817,7 +3841,34 @@ $RTC_HOST {
 $TLS_LINE
 	reverse_proxy lk-jwt-service:8080
 }
+$CALL_HOST {
+$TLS_LINE
+	reverse_proxy element-call:8080
+}
 EOF
+fi
+
+# ---- element-call-config.json(自托管通话前端)----
+# 让前端指向【你自己的】homeserver 与 LiveKit,不引用 element.io 的任何东西。
+if [ "$ENABLE_CALLS" = "1" ]; then
+cat > element-call-config.json <<EOF
+{
+  "default_server_config": {
+    "m.homeserver": {
+      "base_url": "https://$M_HOST",
+      "server_name": "$DOMAIN"
+    }
+  },
+  "livekit": {
+    "livekit_service_url": "https://$RTC_HOST"
+  },
+  "features": {
+    "feature_use_device_session_member_events": true
+  },
+  "app_prompt": false
+}
+EOF
+chmod 644 element-call-config.json
 fi
 
 # ---- livekit.yaml(仅通话)----
