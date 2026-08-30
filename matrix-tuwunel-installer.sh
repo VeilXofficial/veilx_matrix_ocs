@@ -3537,7 +3537,15 @@ cat >> docker-compose.yml <<'EOF'
   # 媒体本来就走自己的 LiveKit;把这一层也拿回来之后,通话链路【完全在自己服务器上】,
   # 断开外网也能内部通话,element.io 也看不到"谁在什么时候开了通话"这类元数据。
   element-call:
-    image: ghcr.io/element-hq/element-call:latest
+    # ⚠️ **锁版本,不要用 :latest**。通话前端是通过 matrix-rust-sdk 的 widget driver
+    # 跟客户端说话的,而客户端那个 SDK 是锁死的(26.7.x)。前端跑太新会出现版本错配:
+    # 新前端发的动作旧 driver 不认识(实测报 `unknown variant io.element.device_mute`
+    # / `io.element.join` / `set_always_on_screen`),新前端要的能力旧 driver 没有槽位
+    # (always_on_screen / timeline / sticky_event / rtc_transports 全被拒),
+    # 表现就是**通话能通、但表情等功能整块失灵**。
+    # v0.22.0(2026-07-20)与 SDK 26.7.15 同期,是当前匹配的版本。
+    # 升级客户端 SDK 时,这里要一起往上抬。
+    image: ghcr.io/element-hq/element-call:v0.22.0
     restart: unless-stopped
     logging: *log
     security_opt: ["no-new-privileges:true"]
@@ -3706,10 +3714,19 @@ fi
 # ⚠️ UA 与 Origin 都是请求方自述的字符串,伪造成本约等于零;已登录的会话也不受影响。
 # 这一层挡的是"随手装了个 Element 的同事",不是有心人。
 if [ "$VEILX_ONLY" != "0" ]; then
+  # 自建通话前端(call.<域名>)也要放行:Element Call 跑在浏览器/WebView 里,
+  # 要访问 /_matrix/client/* 才能工作,而它的 UA 不含 VeilX —— 不放行就会被自家网关
+  # 拦成 M_FORBIDDEN,表现为通话永远卡在 "Waiting for media"。
+  # ⚠️ Origin 和 User-Agent 一样是**请求方自述**的头,伪造成本相同 ——
+  # 所以这条例外**不比 UA 检查更弱**,没有额外削弱这层门槛(它本来就是门槛不是保证)。
+  # 只放行【自己部署的】那个前端;通话没开时这条例外根本不存在。
+  _vx_call=""
+  [ "$ENABLE_CALLS" = "1" ] && _vx_call="
+		not header Origin https://$CALL_HOST"
   VEILX_GATE="	@notveilx {
 		path /_matrix/client/* /_synapse/admin/*
 		not path /_matrix/client/versions
-		not header User-Agent *VeilX*
+		not header User-Agent *VeilX*$_vx_call
 	}
 	handle @notveilx {
 		header Content-Type application/json
